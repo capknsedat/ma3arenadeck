@@ -25,7 +25,7 @@ local signalTable = select(3, ...)
 local myHandle = select(4, ...)
 
 -- Bump when changing runtime behavior so System Monitor proves the reload.
-local PLUGIN_VERSION = "2026-08-09l"
+local PLUGIN_VERSION = "2026-10-03a"
 
 ------------------------------------------------------------------------
 -- Configuration (defaults; overridden by GlobalVars / setup dialog)
@@ -68,17 +68,19 @@ local APPEARANCE_PLAY_PREFIX = "MADP_"
 -- Status polling
 local POLL_INTERVAL_SEC = 0.25
 local POLL_INTERVAL_OPTIONS = { 0.10, 0.25, 0.50, 1.00, 2.00 }
+-- While waiting between polls, check for queued layout taps this often.
+local FIRE_CHECK_SEC = 0.03
 local HIGHLIGHT_PREVIEWING = false -- also highlight "Previewing" clips
 local PLAYING_BORDER_SIZE = 14
 local IDLE_BORDER_SIZE = 7
 local LAYER_BORDER_SIZE = 6
--- Clip frame colors (0-255): idle white, active/playing cyan
-local PLAYING_BORDER_R = 0
-local PLAYING_BORDER_G = 220
-local PLAYING_BORDER_B = 255
-local IDLE_BORDER_R = 255
-local IDLE_BORDER_G = 255
-local IDLE_BORDER_B = 255
+-- Clip frame colors (0-255): idle black, active/playing red
+local PLAYING_BORDER_R = 255
+local PLAYING_BORDER_G = 0
+local PLAYING_BORDER_B = 0
+local IDLE_BORDER_R = 0
+local IDLE_BORDER_G = 0
+local IDLE_BORDER_B = 0
 local LAYER_BORDER_R = 220
 local LAYER_BORDER_G = 220
 local LAYER_BORDER_B = 220
@@ -764,7 +766,11 @@ end
 --- Only one clip per Resolume layer can be Connected, so once we find it we
 --- mark the rest of that layer Disconnected without more HTTP calls.
 --- Previously-playing clips are checked first (usually 1 request/layer).
-local function collect_connected_states_by_clips(clip_metas, timeout_sec)
+--- should_abort (optional) runs before every request; returning true stops the
+--- scan so a queued layout tap is not stuck behind dozens of GETs.
+local POLL_ABORTED = "poll aborted"
+
+local function collect_connected_states_by_clips(clip_metas, timeout_sec, should_abort)
     local by_layer = {}
     local no_layer = {}
     for _, meta in ipairs(clip_metas) do
@@ -782,6 +788,9 @@ local function collect_connected_states_by_clips(clip_metas, timeout_sec)
     local requests = 0
 
     local function check_meta(meta)
+        if should_abort and should_abort() then
+            return nil, POLL_ABORTED
+        end
         requests = requests + 1
         local state, err, n = fetch_clip_connected_state(meta, timeout_sec)
         bytes = bytes + (n or 0)
@@ -1173,14 +1182,14 @@ local function import_image_to_pool(clip, png_data)
 end
 
 local function style_playing_appearance(appearance)
-    -- Subtle cyan marker tint for playing clips. MA3 Obj.Set wants strings.
+    -- Subtle red marker tint for playing clips. MA3 Obj.Set wants strings.
     local props = {
-        { "ImageR", "180" },
-        { "ImageG", "245" },
-        { "ImageB", "255" },
-        { "BACKR", "0" },
-        { "BACKG", "40" },
-        { "BACKB", "50" },
+        { "ImageR", "255" },
+        { "ImageG", "215" },
+        { "ImageB", "215" },
+        { "BACKR", "60" },
+        { "BACKG", "0" },
+        { "BACKB", "0" },
     }
     for _, p in ipairs(props) do
         pcall(function()
@@ -2323,13 +2332,14 @@ local function toggle_trigger_mode()
 end
 
 --- Called from the poll loop: handle clip taps queued via GlobalVars.
+--- Returns layer, column of the fired clip (nil when nothing was queued).
 local function process_pending_fire()
     local v = nil
     pcall(function()
         v = GetVar(GlobalVars(), FIRE_VAR)
     end)
     if v == nil or v == "" or v == 0 or v == "0" then
-        return false
+        return nil
     end
     pcall(function()
         SetVar(GlobalVars(), FIRE_VAR, "")
@@ -2337,7 +2347,7 @@ local function process_pending_fire()
 
     local layer, column = tostring(v):match("^(%d+)%s*,%s*(%d+)$")
     if not layer then
-        return false
+        return nil
     end
 
     local ok, err = http_post(clip_connect_url(layer, column), "", 2)
@@ -2347,11 +2357,11 @@ local function process_pending_fire()
             tonumber(layer) or 0,
             tonumber(column) or 0
         )
-        return true
+        return tonumber(layer), tonumber(column)
     end
 
     Printf("MA3ArenaDeck: trigger FAILED (%s)", tostring(err))
-    return false
+    return nil
 end
 
 local function fire_resolume_clip(layer, column, clip_id)
@@ -2555,6 +2565,39 @@ local function apply_element_playing_state(element, meta, playing)
     apply_playing_chrome(element, playing)
 end
 
+--- Mark the fired clip as playing (and its layer neighbours idle) right away,
+--- without waiting for the next poll round-trip to confirm it.
+local function apply_fired_highlight(layer, column)
+    local layout = DataPool().Layouts[LAYOUT_INDEX]
+    if layout == nil then
+        return
+    end
+    for _, element in ipairs(layout:Children()) do
+        local note = nil
+        pcall(function()
+            note = element.Note or element.note
+        end)
+        local meta = parse_clip_note(note)
+        if meta and meta.layer == layer then
+            local playing = meta.column == column
+            if playing ~= meta.playing then
+                apply_element_playing_state(element, meta, playing)
+            end
+        end
+    end
+end
+
+--- Fire a queued layout tap (if any) and show it immediately.
+--- Returns true when a clip was fired.
+local function handle_pending_fire()
+    local layer, column = process_pending_fire()
+    if not layer then
+        return false
+    end
+    apply_fired_highlight(layer, column)
+    return true
+end
+
 --- Returns ok, err, changed, stats_table
 local function update_playing_highlights()
     local layout = DataPool().Layouts[LAYOUT_INDEX]
@@ -2593,7 +2636,21 @@ local function update_playing_highlights()
 
     if #clip_metas > 0 then
         -- Prefer tiny per-clip requests (layer JSON was ~350KB each / ~3s).
-        states, err, bytes, requests = collect_connected_states_by_clips(clip_metas, 1.5)
+        states, err, bytes, requests =
+            collect_connected_states_by_clips(clip_metas, 1.5, handle_pending_fire)
+        if err == POLL_ABORTED then
+            -- A tap fired mid-scan; these results are stale, re-poll right away.
+            return true, nil, 0, {
+                mode = "aborted",
+                fetch_s = Time() - t_fetch0,
+                apply_s = 0,
+                bytes = bytes or 0,
+                requests = requests or 0,
+                layers = layer_count,
+                clips = #clip_elements,
+                aborted = true,
+            }
+        end
         if not states and layer_count > 0 then
             mode = "layers-fallback"
             states, err, bytes, requests = collect_connected_states_by_layers(layer_indexes, 2)
@@ -2724,7 +2781,7 @@ local function run_monitor_loop()
         local gap_s = tick_start - last_tick_end
 
         -- Layout taps queue fires here (SetVar) so Plugin/Cleanup never runs.
-        process_pending_fire()
+        handle_pending_fire()
 
         local ok, err, changed, stats = update_playing_highlights()
         local tick_s = Time() - tick_start
@@ -2764,13 +2821,29 @@ local function run_monitor_loop()
             break
         end
 
+        -- Wait in short slices so a layout tap fires within ~FIRE_CHECK_SEC
+        -- instead of waiting out the whole poll interval. A tap ends the wait
+        -- early so the next poll confirms the new state at once. An aborted
+        -- poll (tap fired mid-scan) skips the wait entirely.
         interval = get_poll_interval()
-        local yield_ok = pcall(function()
-            coroutine.yield(interval)
-        end)
-        if not yield_ok then
-            local until_t = Time() + interval
-            while get_monitor_flag() and still_owner() and Time() < until_t do
+        local until_t = Time() + interval
+        local skip_wait = stats and stats.aborted
+        while not skip_wait and get_monitor_flag() and still_owner() do
+            if handle_pending_fire() then
+                break
+            end
+            local remaining = until_t - Time()
+            if remaining <= 0 then
+                break
+            end
+            local slice = math.min(FIRE_CHECK_SEC, remaining)
+            local yield_ok = pcall(function()
+                coroutine.yield(slice)
+            end)
+            if not yield_ok then
+                local slice_end = Time() + slice
+                while Time() < slice_end do
+                end
             end
         end
     end

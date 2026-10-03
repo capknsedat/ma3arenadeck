@@ -14,7 +14,7 @@ Ideal for busking, hybrid lighting + video shows, and keeping the media operator
 
 - Builds a **layout grid** that matches your Resolume layers and columns (layer 1 at the bottom, like Resolume)
 - Imports **clip thumbnails** into Images / Appearances
-- **POLL** mode highlights the currently connected (playing) clips in cyan
+- **POLL** mode highlights the currently connected (playing) clips in red
 - **TRIG** mode lets you tap a clip on the layout to fire it in Resolume via the REST API
 - On-layout controls: **SYNC**, **POLL ON / OFF**, **poll interval**, **TRIG ON / OFF**
 - Setup dialog for host, port, layout slot, and pool indexes (values are remembered)
@@ -106,12 +106,14 @@ If both run on the **same computer**, change Resolume’s listen port (for examp
 | Button | Action |
 | --- | --- |
 | **SYNC** | Stops polling, re-fetches the composition, rebuilds the layout and media |
-| **POLL ON** | Starts status polling; playing clips get a cyan frame |
+| **POLL ON** | Starts status polling; playing clips get a red frame |
 | **POLL OFF** | Stops polling |
 | **POLL x.xxs** | Cycles poll interval (`0.10` → `0.25` → `0.50` → `1.00` → `2.00` s) |
 | **TRIG ON / OFF** | When **ON**, tapping a clip cell triggers that clip in Resolume; poll is started so highlights stay in sync |
 
-Playing clips: thicker **cyan** border (and optional name prefix `>`). Idle clips: white border.
+Playing clips: thicker **red** border (and optional name prefix `>`). Idle clips: black border.
+
+With **TRIG ON**, a tapped clip is sent to Resolume within a few tens of milliseconds (taps are checked between every poll request and while waiting for the next poll) and turns red immediately; the next poll confirms the state. Run **SYNC** once after updating so the playing-clip appearances get the new tint.
 
 ---
 
