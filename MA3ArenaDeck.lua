@@ -25,7 +25,7 @@ local signalTable = select(3, ...)
 local myHandle = select(4, ...)
 
 -- Bump when changing runtime behavior so System Monitor proves the reload.
-local PLUGIN_VERSION = "2026-08-09l"
+local PLUGIN_VERSION = "2026-10-04n"
 
 ------------------------------------------------------------------------
 -- Configuration (defaults; overridden by GlobalVars / setup dialog)
@@ -37,6 +37,9 @@ local INTERVAL_VAR = CFG_PREFIX .. "PollInterval"
 local TRIGGER_VAR = CFG_PREFIX .. "Trigger"
 -- Clip taps queue "L,C" here; the poll loop fires Resolume (no Plugin call).
 local FIRE_VAR = CFG_PREFIX .. "Fire"
+-- Layer / composition control taps (clear, bypass, fader steps) append
+-- ";action" here; the poll loop sends them to Resolume.
+local ACTION_VAR = CFG_PREFIX .. "Action"
 
 local RESOLUME_HOST = "127.0.0.1"
 local RESOLUME_PORT = 8080
@@ -68,20 +71,23 @@ local APPEARANCE_PLAY_PREFIX = "MADP_"
 -- Status polling
 local POLL_INTERVAL_SEC = 0.25
 local POLL_INTERVAL_OPTIONS = { 0.10, 0.25, 0.50, 1.00, 2.00 }
+-- While waiting between polls, check for queued layout taps this often.
+local FIRE_CHECK_SEC = 0.03
 local HIGHLIGHT_PREVIEWING = false -- also highlight "Previewing" clips
 local PLAYING_BORDER_SIZE = 14
 local IDLE_BORDER_SIZE = 7
 local LAYER_BORDER_SIZE = 6
--- Clip frame colors (0-255): idle white, active/playing cyan
-local PLAYING_BORDER_R = 0
-local PLAYING_BORDER_G = 220
-local PLAYING_BORDER_B = 255
-local IDLE_BORDER_R = 255
-local IDLE_BORDER_G = 255
-local IDLE_BORDER_B = 255
-local LAYER_BORDER_R = 220
-local LAYER_BORDER_G = 220
-local LAYER_BORDER_B = 220
+-- Clip frame colors (0-255): idle black, active/playing red
+local PLAYING_BORDER_R = 255
+local PLAYING_BORDER_G = 0
+local PLAYING_BORDER_B = 0
+local IDLE_BORDER_R = 0
+local IDLE_BORDER_G = 0
+local IDLE_BORDER_B = 0
+-- Layer / COMPOSITION header frames: black like idle clips
+local LAYER_BORDER_R = 0
+local LAYER_BORDER_G = 0
+local LAYER_BORDER_B = 0
 
 -- Control macros + buttons under the grid
 local MACRO_START_INDEX = 200
@@ -92,6 +98,35 @@ local BUTTON_HEIGHT = 60
 local BUTTON_GAP = 12
 -- Extra offset below layer-1 row so controls never sit on the clip grid
 local BUTTON_ROW_OFFSET = 40
+
+-- Helpers / settings for layer controls and border colours live in one
+-- table: the main chunk is at the 200-local limit.
+local lc = {}
+-- clip id -> playing as last drawn by this monitor (so a redraw only
+-- happens on a real change, independent of reading the note back).
+lc.play_cache = {}
+-- layer -> next column position to probe when nothing is known to play there.
+lc.scan_cursor = {}
+-- Clip slots probed per layer per poll when no clip is known to play there.
+lc.SCAN_PER_TICK = 2
+
+-- Layer / composition controls left of the layer labels:
+--   [X] [M] [A] [V]   (one row per layer)
+--   [X] [B] [GM]      (composition row above the top layer)
+-- M / A / V / GM show the level; tapping one opens a fader popup.
+lc.SHOW_LAYER_CONTROLS = true
+lc.FADER_BTN_WIDTH = 70
+lc.FADER_GAP = 14
+lc.CTRL_BTN_WIDTH = 70
+lc.LEVEL_COLOR = {
+    master = { r = 200, g = 200, b = 200 },
+    audio = { r = 230, g = 80, b = 140 },
+    video = { r = 80, g = 210, b = 140 },
+    off = { r = 45, g = 45, b = 50 },
+    clear = { r = 120, g = 30, b = 30 },
+    bypass_on = { r = 255, g = 0, b = 0 },
+    bypass_off = { r = 70, g = 70, b = 75 },
+}
 
 -- Control button colors (active = currently selected mode)
 local CTRL_COLOR = {
@@ -552,6 +587,58 @@ local function http_post(url, body, timeout_sec)
     return true, nil
 end
 
+--- PUT a JSON body (Resolume parameter updates). Treats 2xx as success.
+function lc.http_put(url, body, timeout_sec)
+    local previous_timeout = http.TIMEOUT
+    if timeout_sec ~= nil then
+        http.TIMEOUT = timeout_sec
+    end
+
+    body = body or ""
+    local response = {}
+    local ok, code, _headers, status = http.request({
+        url = url,
+        method = "PUT",
+        headers = {
+            ["Content-Type"] = "application/json",
+            ["Content-Length"] = tostring(#body),
+            ["Connection"] = "close",
+        },
+        source = ltn12.source.string(body),
+        sink = ltn12.sink.table(response),
+    })
+
+    if previous_timeout ~= nil then
+        http.TIMEOUT = previous_timeout
+    end
+
+    if not ok then
+        return nil, string.format("HTTP PUT failed: %s", tostring(code))
+    end
+    local status_code = tonumber(code) or 0
+    if status_code < 200 or status_code >= 300 then
+        return nil, string.format("HTTP %s (%s)", tostring(code), tostring(status))
+    end
+    return true, nil
+end
+
+function lc.layer_clear_url(layer_index)
+    return string.format(
+        "http://%s:%d/api/v1/composition/layers/%d/clear",
+        RESOLUME_HOST,
+        RESOLUME_PORT,
+        tonumber(layer_index) or 1
+    )
+end
+
+function lc.disconnect_all_url()
+    return string.format(
+        "http://%s:%d/api/v1/composition/disconnect-all",
+        RESOLUME_HOST,
+        RESOLUME_PORT
+    )
+end
+
 local function thumbnail_url(clip)
     if type(clip.thumbnail_path) == "string" and clip.thumbnail_path ~= "" then
         if clip.thumbnail_path:sub(1, 1) == "/" then
@@ -645,12 +732,17 @@ local function collect_clips(composition)
             end
         end
 
+        local video = type(layer.video) == "table" and layer.video or {}
+        local audio = type(layer.audio) == "table" and layer.audio or {}
         layers_meta[#layers_meta + 1] = {
             index = layer_index,
             id = layer.id,
             name = layer_name,
             filled = filled,
             columns = #layer_clips,
+            master = tonumber(param_value(layer.master, 1)) or 1,
+            opacity = tonumber(param_value(video.opacity, 1)) or 1,
+            volume = type(audio.volume) == "table" and audio.volume or nil,
         }
     end
 
@@ -668,6 +760,8 @@ local function collect_clips(composition)
         layers = layers_meta,
         layer_count = #layers_meta,
         max_column = max_column,
+        master = tonumber(param_value(composition.master, 1)) or 1,
+        bypassed = param_value(composition.bypassed, false) == true,
     }
 end
 
@@ -706,48 +800,22 @@ local function collect_connected_states(composition)
     return states
 end
 
---- Lighter poll: fetch each layer instead of the full composition JSON.
---- (Still heavy: Resolume returns full clip trees per layer ~hundreds of KB.)
-local function collect_connected_states_by_layers(layer_indexes, timeout_sec)
-    local states = {}
-    local bytes = 0
-    local requests = 0
-    for layer_index in pairs(layer_indexes) do
-        requests = requests + 1
-        local raw, err = http_get(layer_url(layer_index), "application/json", timeout_sec or 2)
-        if not raw then
-            return nil, err, bytes, requests
-        end
-        bytes = bytes + #raw
-        local ok, layer = pcall(json.decode, raw)
-        if not ok or type(layer) ~= "table" then
-            return nil, "Failed to decode layer JSON " .. tostring(layer_index), bytes, requests
-        end
-        for _, clip in ipairs(layer.clips or {}) do
-            if clip.id ~= nil then
-                states[tostring(clip.id)] = param_value(clip.connected, "Disconnected")
-            end
-        end
-    end
-    return states, nil, bytes, requests
-end
-
 local function fetch_clip_connected_state(meta, timeout_sec)
+    -- Connection: close on purpose. LuaSocket never reuses the socket, and a
+    -- keep-alive reply without a usable length is read until the timeout.
     local raw, err
     if meta.layer and meta.layer > 0 and meta.column and meta.column > 0 then
         raw, err = http_get(
             clip_slot_url(meta.layer, meta.column),
             "application/json",
-            timeout_sec or 1.5,
-            true
+            timeout_sec or 1.0
         )
     end
     if not raw then
         raw, err = http_get(
             clip_by_id_url(meta.id),
             "application/json",
-            timeout_sec or 1.5,
-            true
+            timeout_sec or 1.0
         )
     end
     if not raw then
@@ -764,7 +832,11 @@ end
 --- Only one clip per Resolume layer can be Connected, so once we find it we
 --- mark the rest of that layer Disconnected without more HTTP calls.
 --- Previously-playing clips are checked first (usually 1 request/layer).
-local function collect_connected_states_by_clips(clip_metas, timeout_sec)
+--- should_abort (optional) runs before every request; returning true stops the
+--- scan so a queued layout tap is not stuck behind dozens of GETs.
+local POLL_ABORTED = "poll aborted"
+
+local function collect_connected_states_by_clips(clip_metas, timeout_sec, should_abort)
     local by_layer = {}
     local no_layer = {}
     for _, meta in ipairs(clip_metas) do
@@ -780,39 +852,71 @@ local function collect_connected_states_by_clips(clip_metas, timeout_sec)
     local states = {}
     local bytes = 0
     local requests = 0
+    local failures = 0
+    local last_err = nil
 
+    -- One bad slot must not fail the whole poll (that used to drop into the
+    -- multi-second layer/composition fallbacks). Keep its last known state.
     local function check_meta(meta)
+        if should_abort and should_abort() then
+            return nil, POLL_ABORTED
+        end
         requests = requests + 1
         local state, err, n = fetch_clip_connected_state(meta, timeout_sec)
         bytes = bytes + (n or 0)
         if not state then
-            return nil, err
+            failures = failures + 1
+            last_err = err
+            state = meta.playing and "Connected" or "Disconnected"
         end
         states[tostring(meta.id)] = state
         return state, nil
     end
 
-    for _, metas in pairs(by_layer) do
+    -- Per layer: confirm the clip(s) we believe are playing (1 request).
+    -- Only when nothing plays there, probe a few other slots round-robin
+    -- instead of every slot each poll; a full scan of all clips every
+    -- 0.1 s kept MA3 busy and made the layout feel like it kept reloading.
+    -- Only one clip per Resolume layer can be Connected.
+    for layer, metas in pairs(by_layer) do
         table.sort(metas, function(a, b)
-            if a.playing == b.playing then
-                return (a.column or 0) < (b.column or 0)
-            end
-            return a.playing and not b.playing
+            return (a.column or 0) < (b.column or 0)
         end)
-
-        local connected_id = nil
         for _, meta in ipairs(metas) do
-            if connected_id then
-                states[tostring(meta.id)] = "Disconnected"
-            else
+            states[tostring(meta.id)] = "Disconnected"
+        end
+
+        local connected = false
+        for _, meta in ipairs(metas) do
+            if meta.playing and not connected then
                 local state, err = check_meta(meta)
                 if not state then
                     return nil, err, bytes, requests
                 end
-                if is_playing_state(state) then
-                    connected_id = tostring(meta.id)
+                connected = is_playing_state(state)
+            end
+        end
+
+        if not connected and #metas > 0 then
+            local cursor = lc.scan_cursor[layer] or 1
+            local probes = math.min(lc.SCAN_PER_TICK, #metas)
+            for _ = 1, probes do
+                if cursor > #metas then
+                    cursor = 1
+                end
+                local meta = metas[cursor]
+                cursor = cursor + 1
+                if not meta.playing then
+                    local state, err = check_meta(meta)
+                    if not state then
+                        return nil, err, bytes, requests
+                    end
+                    if is_playing_state(state) then
+                        break
+                    end
                 end
             end
+            lc.scan_cursor[layer] = cursor
         end
     end
 
@@ -821,6 +925,10 @@ local function collect_connected_states_by_clips(clip_metas, timeout_sec)
         if not state then
             return nil, err, bytes, requests
         end
+    end
+
+    if requests > 0 and failures == requests then
+        return nil, last_err, bytes, requests
     end
 
     return states, nil, bytes, requests
@@ -1172,15 +1280,32 @@ local function import_image_to_pool(clip, png_data)
     }
 end
 
-local function style_playing_appearance(appearance)
-    -- Subtle cyan marker tint for playing clips. MA3 Obj.Set wants strings.
+--- Background colour of a clip appearance (shows around / behind the thumbnail).
+local function set_appearance_back(appearance, r, g, b)
+    local color01 = string.format("%.3f,%.3f,%.3f,1", r / 255, g / 255, b / 255)
     local props = {
-        { "ImageR", "180" },
-        { "ImageG", "245" },
+        { "Color", color01 },
+        { "BackR", tostring(r) },
+        { "BackG", tostring(g) },
+        { "BackB", tostring(b) },
+        { "BackAlpha", "255" },
+        { "BACKR", tostring(r) },
+        { "BACKG", tostring(g) },
+        { "BACKB", tostring(b) },
+    }
+    for _, p in ipairs(props) do
+        pcall(function()
+            appearance:Set(p[1], p[2])
+        end)
+    end
+end
+
+local function style_idle_appearance(appearance)
+    set_appearance_back(appearance, IDLE_BORDER_R, IDLE_BORDER_G, IDLE_BORDER_B)
+    local props = {
+        { "ImageR", "255" },
+        { "ImageG", "255" },
         { "ImageB", "255" },
-        { "BACKR", "0" },
-        { "BACKG", "40" },
-        { "BACKB", "50" },
     }
     for _, p in ipairs(props) do
         pcall(function()
@@ -1190,65 +1315,148 @@ local function style_playing_appearance(appearance)
 end
 
 -- Remember which border-color write works on this console (avoid Cmd spam).
-local border_color_method = nil -- "obj-BorderColor" | "cmd-BorderColor" | ...
+-- nil = not probed yet, false = nothing worked, else index into lc.BORDER_COLOR_WAYS.
+local border_color_way = nil
+local border_color_logged = false
 
---- Apply border color on a layout element.
-local function set_element_border_color(element, r, g, b)
-    if element == nil then
-        return
-    end
+function lc.color_formats(r, g, b)
+    return {
+        -- grandMA3 colour properties are 0..1 floats (same as Appearance "Color").
+        float = string.format("%.3f,%.3f,%.3f,1", r / 255, g / 255, b / 255),
+        int = string.format("%d,%d,%d,255", r, g, b),
+        hex = string.format("%02X%02X%02XFF", r, g, b),
+    }
+end
 
-    local idx = nil
+lc.BORDER_COLOR_WAYS = {
+    { prop = "BorderColor", fmt = "float" },
+    { prop = "BorderColor", fmt = "hex" },
+    { prop = "BorderColor", fmt = "int" },
+    { prop = "BORDERCOLOR", fmt = "float" },
+    { prop = "BorderColor", fmt = "float", cmd = true },
+    { prop = "BorderColor", fmt = "int", cmd = true },
+}
+
+function lc.read_element_prop(element, prop)
+    local value = nil
     pcall(function()
-        idx = element:Index()
+        value = element:Get(prop)
     end)
-    if not idx then
-        return
-    end
-
-    local color = string.format("%d,%d,%d,255", r, g, b)
-
-    local function try_obj(prop)
-        return pcall(function()
-            element:Set(prop, color)
+    if value == nil then
+        pcall(function()
+            value = element[prop]
         end)
     end
+    if value == nil then
+        return nil
+    end
+    return tostring(value)
+end
 
-    local function try_cmd(prop)
+--- True when a read-back colour string matches the wanted 0-255 RGB.
+function lc.color_matches(readback, r, g, b)
+    if type(readback) ~= "string" or readback == "" then
+        return false
+    end
+    local want = { r / 255, g / 255, b / 255 }
+    local hex = readback:match("^#?(%x%x%x%x%x%x)")
+    if hex and not readback:find(",") then
+        local got = {
+            tonumber(hex:sub(1, 2), 16) / 255,
+            tonumber(hex:sub(3, 4), 16) / 255,
+            tonumber(hex:sub(5, 6), 16) / 255,
+        }
+        for i = 1, 3 do
+            if math.abs(got[i] - want[i]) > 0.02 then
+                return false
+            end
+        end
+        return true
+    end
+    local nums = {}
+    for n in readback:gmatch("[%d%.]+") do
+        nums[#nums + 1] = tonumber(n)
+    end
+    if #nums < 3 then
+        return false
+    end
+    local scale = (nums[1] > 1 or nums[2] > 1 or nums[3] > 1) and 255 or 1
+    for i = 1, 3 do
+        if math.abs((nums[i] or 0) / scale - want[i]) > 0.02 then
+            return false
+        end
+    end
+    return true
+end
+
+function lc.write_border_color(element, way, r, g, b)
+    local value = lc.color_formats(r, g, b)[way.fmt]
+    if way.cmd then
+        local idx = nil
+        pcall(function()
+            idx = element:Index()
+        end)
+        if not idx then
+            return false
+        end
         return pcall(function()
             Cmd(string.format(
                 'Set Layout %d.%d Property "%s" "%s"',
                 LAYOUT_INDEX,
                 idx,
-                prop,
-                color
+                way.prop,
+                value
             ))
         end)
     end
+    return pcall(function()
+        element:Set(way.prop, value)
+    end)
+end
 
-    if border_color_method == "obj-BorderColor" then
-        try_obj("BorderColor")
-        return
-    elseif border_color_method == "obj-BORDERCOLOR" then
-        try_obj("BORDERCOLOR")
-        return
-    elseif border_color_method == "cmd-BorderColor" then
-        try_cmd("BorderColor")
-        return
-    elseif border_color_method == "cmd-BORDERCOLOR" then
-        try_cmd("BORDERCOLOR")
+--- Apply border color on a layout element.
+--- The first call probes which property/format the console accepts by
+--- reading the value back, and logs the result once to System Monitor.
+local function set_element_border_color(element, r, g, b)
+    if element == nil then
         return
     end
 
-    if try_obj("BorderColor") then
-        border_color_method = "obj-BorderColor"
-    elseif try_obj("BORDERCOLOR") then
-        border_color_method = "obj-BORDERCOLOR"
-    elseif try_cmd("BorderColor") then
-        border_color_method = "cmd-BorderColor"
-    elseif try_cmd("BORDERCOLOR") then
-        border_color_method = "cmd-BORDERCOLOR"
+    if border_color_way then
+        lc.write_border_color(element, lc.BORDER_COLOR_WAYS[border_color_way], r, g, b)
+        return
     end
+    if border_color_way == false then
+        return
+    end
+
+    local before = lc.read_element_prop(element, "BorderColor")
+    for i, way in ipairs(lc.BORDER_COLOR_WAYS) do
+        if lc.write_border_color(element, way, r, g, b)
+            and lc.color_matches(lc.read_element_prop(element, way.prop), r, g, b)
+        then
+            border_color_way = i
+            Printf(
+                "MA3ArenaDeck: border colour via %s (%s) -> '%s'",
+                way.prop,
+                way.fmt,
+                tostring(lc.read_element_prop(element, way.prop))
+            )
+            return
+        end
+    end
+
+    -- Nothing verified: keep the float write (most likely format) but say so.
+    lc.write_border_color(element, lc.BORDER_COLOR_WAYS[1], r, g, b)
+    if not border_color_logged then
+        border_color_logged = true
+        Printf(
+            "MA3ArenaDeck: border colour not confirmed (BorderColor was '%s', now '%s'); using appearance colours",
+            tostring(before),
+            tostring(lc.read_element_prop(element, "BorderColor"))
+        )
+    end
+    border_color_way = 1
 end
 
 local function apply_playing_chrome(element, playing)
@@ -1298,9 +1506,8 @@ local function ensure_named_appearance(app_name, image_info, playing)
             app_index
         ))
     end
-    if playing then
-        style_playing_appearance(appearance)
-    end
+    -- Playing vs idle differ only by the red border, not the picture.
+    style_idle_appearance(appearance)
 
     return {
         index = app_index,
@@ -1331,22 +1538,20 @@ local function ensure_appearances_for_image(image_info, clip_id)
 end
 
 local function ensure_appearances_without_image(clip_id)
-    local idle_name = APPEARANCE_IDLE_PREFIX .. tostring(clip_id)
-    local play_name = APPEARANCE_PLAY_PREFIX .. tostring(clip_id)
-
-    local idle, idle_err = ensure_named_appearance(idle_name, nil, false)
-    if not idle then
-        return nil, idle_err
+    -- Clips without a thumbnail (e.g. effect / generator clips) get no
+    -- appearance at all; an empty one only shows MA3's macro icon.
+    -- Remove ones left over from earlier syncs so lookups find nothing.
+    local appearances = get_appearances_pool()
+    if appearances ~= nil then
+        for _, prefix in ipairs({ APPEARANCE_IDLE_PREFIX, APPEARANCE_PLAY_PREFIX }) do
+            local name = prefix .. tostring(clip_id)
+            local idx = find_pool_index_by_name(appearances, name, APPEARANCE_START_INDEX, MAX_MEDIA_SLOTS)
+            if idx then
+                lc.delete_appearance(idx)
+            end
+        end
     end
-    local play, play_err = ensure_named_appearance(play_name, nil, true)
-    if not play then
-        return nil, play_err
-    end
-    return {
-        image = nil,
-        appearance_idle = idle,
-        appearance_play = play,
-    }
+    return { image = nil }
 end
 
 local function lookup_appearances_for_clip(clip_id)
@@ -1661,8 +1866,9 @@ local function ensure_clip_trigger_macros(clips)
             local name = string.format("MAD_Fire_L%dC%d", layer, column)
             macro:Set("Name", name)
             write_macro_lines(macro, macro_index, {
+                -- Third field = tap time, so the log shows how long the tap waited.
                 string.format(
-                    'Lua "SetVar(GlobalVars(), \'%s\', \'%d,%d\')"',
+                    'Lua "SetVar(GlobalVars(), \'%s\', \'%d,%d,\' .. (Time and Time() or \'\'))"',
                     FIRE_VAR,
                     layer,
                     column
@@ -1678,6 +1884,119 @@ local function ensure_clip_trigger_macros(clips)
         TRIGGER_MACRO_START
     )
     return map
+end
+
+--- Resolume layer audio volume is a dB range (e.g. -192..12); fader steps
+--- are 0..1, so convert both ways. Linear 0..1 ranges pass through.
+function lc.volume_is_db(param)
+    if type(param) ~= "table" then
+        return false
+    end
+    local min = tonumber(param.min) or 0
+    local max = tonumber(param.max) or 1
+    return min < 0 or max > 1
+end
+
+function lc.fraction_to_volume(param, p)
+    if not lc.volume_is_db(param) then
+        return p
+    end
+    local min = tonumber(param.min) or -192
+    local max = tonumber(param.max) or 0
+    if p <= 0 then
+        return min
+    end
+    local db = 20 * math.log(p) / math.log(10)
+    if db < min then
+        db = min
+    end
+    if db > max then
+        db = max
+    end
+    return db
+end
+
+function lc.volume_to_fraction(param)
+    if type(param) ~= "table" then
+        return 1
+    end
+    local v = tonumber(param_value(param, 0)) or 0
+    if not lc.volume_is_db(param) then
+        return v
+    end
+    local min = tonumber(param.min) or -192
+    if v <= min + 0.5 then
+        return 0
+    end
+    local p = 10 ^ (v / 20)
+    if p > 1 then
+        p = 1
+    end
+    return p
+end
+
+function lc.action_macro_line(action)
+    return string.format(
+        'Lua "SetVar(GlobalVars(), \'%s\', tostring(GetVar(GlobalVars(), \'%s\') or \'\') .. \';%s\')"',
+        ACTION_VAR,
+        ACTION_VAR,
+        action
+    )
+end
+
+--- Macros for layer / composition controls, placed after the clip macros.
+--- Returns a list of { macro_index, action, ... } definitions in build order.
+function lc.ensure_layer_control_macros(grid, first_index)
+    local defs = {}
+    local function add(def)
+        def.macro_index = first_index + #defs
+        defs[#defs + 1] = def
+    end
+    local function fader(scope, kind, name)
+        add({
+            scope = scope,
+            kind = kind,
+            line = plugin_command(string.format("fader %d %s", scope, kind)),
+            name = name,
+        })
+    end
+
+    add({ scope = 0, kind = "clear", line = lc.action_macro_line("clearall"), name = "MAD_ClearAll" })
+    add({ scope = 0, kind = "bypass", line = lc.action_macro_line("bypass"), name = "MAD_Bypass" })
+    fader(0, "master", "MAD_GrandMaster")
+
+    for _, layer in ipairs(grid.layers or {}) do
+        local L = layer.index
+        add({
+            scope = L,
+            kind = "clear",
+            line = lc.action_macro_line(string.format("clear,%d", L)),
+            name = string.format("MAD_L%d_Clear", L),
+        })
+        for _, kind in ipairs({ "master", "audio", "video" }) do
+            fader(L, kind, string.format("MAD_L%d_%s", L, kind:sub(1, 1):upper()))
+        end
+    end
+
+    if #defs > 0 then
+        ensure_macro(defs[#defs].macro_index)
+    end
+    for _, def in ipairs(defs) do
+        local macro = ensure_macro(def.macro_index)
+        if macro == nil then
+            Printf("MA3ArenaDeck: could not create control Macro %d", def.macro_index)
+            def.macro_index = nil
+        else
+            macro:Set("Name", def.name)
+            write_macro_lines(macro, def.macro_index, { def.line })
+        end
+    end
+    Printf(
+        "MA3ArenaDeck: layer control macros ready (%d, start=%d)",
+        #defs,
+        first_index
+    )
+    return defs
 end
 
 ------------------------------------------------------------------------
@@ -1764,6 +2083,132 @@ local function label_pos(layer_index, _layer_count)
     return x, y
 end
 
+--- Delete one appearance pool slot (references to it fall back to none).
+function lc.delete_appearance(index)
+    local appearances = get_appearances_pool()
+    if appearances == nil or index == nil then
+        return
+    end
+    pcall(function()
+        Cmd(string.format("Delete Appearance %d /NoConfirm", index))
+    end)
+    if pool_object_valid(appearances[index]) then
+        pcall(function()
+            appearances:Delete(index)
+        end)
+    end
+end
+
+--- Earlier versions gave buttons / their macros solid-colour appearances.
+--- Deleting those makes every button and macro that used them "none".
+lc.LEGACY_APPEARANCES = {
+    "MAD_Lvl_Off", "MAD_Lvl_master", "MAD_Lvl_audio", "MAD_Lvl_video",
+    "MAD_Bypass_On", "MAD_Bypass_Off", "MAD_Clear",
+    "MAD_Btn_PollOn_On", "MAD_Btn_PollOn_Off", "MAD_Btn_PollOff_On", "MAD_Btn_PollOff_Off",
+    "MAD_Btn_Interval", "MAD_Btn_Trig_On", "MAD_Btn_Trig_Off", "MAD_Btn_Sync",
+}
+
+function lc.delete_legacy_appearances()
+    local appearances = get_appearances_pool()
+    if appearances == nil then
+        return
+    end
+    local removed = 0
+    for _, name in ipairs(lc.LEGACY_APPEARANCES) do
+        local idx = find_pool_index_by_name(appearances, name, APPEARANCE_START_INDEX, MAX_MEDIA_SLOTS)
+        if idx then
+            lc.delete_appearance(idx)
+            removed = removed + 1
+        end
+    end
+    if removed > 0 then
+        Printf("MA3ArenaDeck: removed %d old button appearances", removed)
+    end
+end
+
+--- Set "no appearance" on a layout element and on the Macro it carries.
+--- With an appearance (even a plain colour) MA3 draws the macro's paper
+--- icon; with none the button is just its border and centred text.
+--- Set the layout element's appearance to None (as picked in the element
+--- editor). The Macro objects themselves are left untouched.
+function lc.clear_appearance(element)
+    if element == nil then
+        return
+    end
+    for _, value in ipairs({ "None", "" }) do
+        pcall(function()
+            element:Set("Appearance", value)
+        end)
+    end
+    pcall(function()
+        element.Appearance = nil
+    end)
+    local idx = nil
+    pcall(function()
+        idx = element:Index()
+    end)
+    if idx then
+        pcall(function()
+            Cmd(string.format('Set Layout %d.%d Property "Appearance" "None"', LAYOUT_INDEX, idx))
+        end)
+    end
+end
+
+--- Keep the label inside the button, centred both ways (also after the
+--- Macro is assigned, which may reset text placement).
+function lc.center_text(element)
+    local idx = nil
+    pcall(function()
+        idx = element:Index()
+    end)
+    for _, pair in ipairs({
+        { "customtextalignmenth", "Center" },
+        { "customtextalignmentv", "Center" },
+        { "CustomTextAlignmentH", "Center" },
+        { "CustomTextAlignmentV", "Center" },
+        { "visibilityobjectname", "Hidden" },
+    }) do
+        pcall(function()
+            element:Set(pair[1], pair[2])
+        end)
+    end
+    if idx then
+        pcall(function()
+            Cmd(string.format(
+                'Set Layout %d.%d Property "CustomTextAlignmentV" "Center"',
+                LAYOUT_INDEX,
+                idx
+            ))
+        end)
+    end
+end
+
+--- One-time System Monitor dump of a control element's text / appearance
+--- properties, so the exact property names on this MA3 build are visible.
+function lc.dump_element_props(element)
+    if lc.props_dumped or element == nil then
+        return
+    end
+    lc.props_dumped = true
+    local count = 0
+    pcall(function()
+        count = element:PropertyCount()
+    end)
+    local parts = {}
+    for i = 0, count - 1 do
+        pcall(function()
+            local name = element:PropertyName(i)
+            local lname = tostring(name):lower()
+            if lname:find("text") or lname:find("align") or lname:find("appear")
+                or lname:find("visib") or lname:find("label")
+            then
+                parts[#parts + 1] = string.format("%s=%s", tostring(name), tostring(element:Get(name)))
+            end
+        end)
+    end
+    Printf("MA3ArenaDeck: element props: %s", table.concat(parts, " | "))
+end
+
 local function assign_appearance(element, appearance_info)
     if element == nil or appearance_info == nil or appearance_info.handle == nil then
         return false
@@ -1814,97 +2259,6 @@ local function assign_appearance(element, appearance_info)
 end
 
 --- Solid fill Appearance for control buttons (no image).
-local function ensure_solid_appearance(app_name, r, g, b)
-    local appearances = get_appearances_pool()
-    if appearances == nil then
-        return nil
-    end
-
-    local app_index, err = ensure_pool_index(
-        appearances,
-        app_name,
-        APPEARANCE_START_INDEX,
-        MAX_MEDIA_SLOTS
-    )
-    if not app_index then
-        Printf("MA3ArenaDeck: solid appearance '%s' failed: %s", app_name, tostring(err))
-        return nil
-    end
-
-    if appearances[app_index] == nil then
-        ensure_pool_object(appearances, app_index)
-    end
-    local appearance = appearances[app_index]
-    if appearance == nil or not pool_object_valid(appearance) then
-        return nil
-    end
-
-    appearance:Set("Name", app_name)
-    local color01 = string.format("%.3f,%.3f,%.3f,1", r / 255, g / 255, b / 255)
-    pcall(function()
-        appearance:Set("Color", color01)
-    end)
-    pcall(function()
-        Cmd(string.format(
-            'Set Appearance %d Property "Color" "%s"',
-            app_index,
-            color01
-        ))
-    end)
-
-    local channel_props = {
-        { "ImageR", r },
-        { "ImageG", g },
-        { "ImageB", b },
-        { "BACKR", r },
-        { "BACKG", g },
-        { "BACKB", b },
-        { "BackR", r },
-        { "BackG", g },
-        { "BackB", b },
-        { "ImageAlpha", 255 },
-        { "BackAlpha", 255 },
-    }
-    for _, p in ipairs(channel_props) do
-        pcall(function()
-            appearance:Set(p[1], tostring(p[2]))
-        end)
-    end
-
-    return {
-        index = app_index,
-        name = app_name,
-        handle = appearance,
-    }
-end
-
-local function control_appearance_for(kind, active)
-    if kind == "monitor" then
-        local c = active and CTRL_COLOR.poll_on_active or CTRL_COLOR.poll_on_idle
-        local name = active and "MAD_Btn_PollOn_On" or "MAD_Btn_PollOn_Off"
-        return ensure_solid_appearance(name, c.r, c.g, c.b)
-    end
-    if kind == "stop" then
-        local c = active and CTRL_COLOR.poll_off_active or CTRL_COLOR.poll_off_idle
-        local name = active and "MAD_Btn_PollOff_On" or "MAD_Btn_PollOff_Off"
-        return ensure_solid_appearance(name, c.r, c.g, c.b)
-    end
-    if kind == "interval" then
-        local c = CTRL_COLOR.interval
-        return ensure_solid_appearance("MAD_Btn_Interval", c.r, c.g, c.b)
-    end
-    if kind == "trigger" then
-        local c = active and CTRL_COLOR.trigger_active or CTRL_COLOR.trigger_idle
-        local name = active and "MAD_Btn_Trig_On" or "MAD_Btn_Trig_Off"
-        return ensure_solid_appearance(name, c.r, c.g, c.b)
-    end
-    if kind == "sync" then
-        local c = CTRL_COLOR.sync
-        return ensure_solid_appearance("MAD_Btn_Sync", c.r, c.g, c.b)
-    end
-    return nil
-end
-
 local function element_addr(element)
     if element == nil then
         return nil
@@ -1932,8 +2286,10 @@ local function cleanup_stray_rcs_macro_elements(layout)
 
         local is_ctrl_button = type(note) == "string" and note:find("^resolume%-ctrl:") ~= nil
         local is_clip = type(note) == "string" and note:find("^resolume%-clip:") ~= nil
-        -- Clip cells may have MAD_Fire_* macros assigned when trigger mode is on.
-        if not is_ctrl_button and not is_clip then
+        local is_level = type(note) == "string" and note:find("^resolume%-lvl:") ~= nil
+        -- Clip cells may have MAD_Fire_* macros assigned when trigger mode is on;
+        -- layer / composition control cells always carry their MAD_* macro.
+        if not is_ctrl_button and not is_clip and not is_level then
             local obj_name = ""
             pcall(function()
                 local obj = el.Object
@@ -2019,11 +2375,9 @@ local function apply_control_chrome(element, kind, active)
     end)
     set_element_border_color(element, color.r, color.g, color.b)
 
-    -- Solid appearance fill (border color alone is unreliable on macro elements).
-    local app = control_appearance_for(kind, active)
-    if app then
-        assign_appearance(element, app)
-    end
+    -- No appearance: it only makes MA3 draw the macro icon; the coloured
+    -- border carries the state.
+    lc.clear_appearance(element)
 
     if kind == "interval" then
         pcall(function()
@@ -2157,6 +2511,7 @@ local function place_control_macro(layout, macro_index, geo)
         style_element(target, geo)
     end
     set_element_action_go(target)
+    lc.center_text(target)
     pcall(function()
         target:Set("visibilityobjectname", "Hidden")
     end)
@@ -2323,35 +2678,40 @@ local function toggle_trigger_mode()
 end
 
 --- Called from the poll loop: handle clip taps queued via GlobalVars.
+--- Returns layer, column of the fired clip (nil when nothing was queued).
 local function process_pending_fire()
     local v = nil
     pcall(function()
         v = GetVar(GlobalVars(), FIRE_VAR)
     end)
     if v == nil or v == "" or v == 0 or v == "0" then
-        return false
+        return nil
     end
     pcall(function()
         SetVar(GlobalVars(), FIRE_VAR, "")
     end)
 
-    local layer, column = tostring(v):match("^(%d+)%s*,%s*(%d+)$")
+    local layer, column, tapped_at = tostring(v):match("^(%d+)%s*,%s*(%d+)%s*,?%s*([%d%.]*)$")
     if not layer then
-        return false
+        return nil
     end
 
+    local t_post = Time()
     local ok, err = http_post(clip_connect_url(layer, column), "", 2)
     if ok then
+        local waited = tonumber(tapped_at) and (t_post - tonumber(tapped_at)) or -1
         Printf(
-            "MA3ArenaDeck: triggered L%d C%d (from layout tap)",
+            "MA3ArenaDeck: triggered L%d C%d (tap waited %.2fs, POST %.2fs)",
             tonumber(layer) or 0,
-            tonumber(column) or 0
+            tonumber(column) or 0,
+            waited,
+            Time() - t_post
         )
-        return true
+        return tonumber(layer), tonumber(column)
     end
 
     Printf("MA3ArenaDeck: trigger FAILED (%s)", tostring(err))
-    return false
+    return nil
 end
 
 local function fire_resolume_clip(layer, column, clip_id)
@@ -2437,6 +2797,197 @@ local function add_control_buttons(layout, layer_count)
     return created
 end
 
+function lc.level_note(scope, kind, step)
+    return string.format("resolume-lvl:%d:%s:%.2f", scope, kind, step or 0)
+end
+
+function lc.parse_level_note(note)
+    if type(note) ~= "string" then
+        return nil
+    end
+    local scope, kind, step = note:match("^resolume%-lvl:(%d+):(%a+):([%d%.]+)")
+    if not scope then
+        return nil
+    end
+    return tonumber(scope), kind, tonumber(step)
+end
+
+function lc.fader_label(scope, kind, value)
+    local name = scope == 0 and "GM" or (kind == "master" and "M" or kind:sub(1, 1):upper())
+    return string.format("%s %d%%", name, math.floor((value or 0) * 100 + 0.5))
+end
+
+function lc.style_fader_button(element, scope, kind, value)
+    local lit = (value or 0) > 0.001
+    lc.clear_appearance(element)
+    local c = lit and (lc.LEVEL_COLOR[kind] or lc.LEVEL_COLOR.master) or lc.LEVEL_COLOR.off
+    set_element_border_color(element, c.r, c.g, c.b)
+    pcall(function()
+        element:Set("customtexttext", lc.fader_label(scope, kind, value))
+    end)
+end
+
+--- Last level sent from MA3 (0..1), kept in GlobalVars so every plugin
+--- call (layout tap, fader popup, poll loop) sees the same value.
+function lc.get_level(scope, kind)
+    return tonumber(cfg_get(string.format("Lvl_%d_%s", scope, kind), 1)) or 1
+end
+
+function lc.set_level(scope, kind, value)
+    cfg_set(string.format("Lvl_%d_%s", scope, kind), string.format("%.4f", value or 0))
+end
+
+--- Layer audio volume range stored at SYNC ("min,max"); nil = linear 0..1.
+function lc.get_volume_param(scope)
+    local v = cfg_get(string.format("VolR_%d", scope), "")
+    local min, max = tostring(v):match("^(%-?[%d%.]+),(%-?[%d%.]+)$")
+    if not min then
+        return nil
+    end
+    return { min = tonumber(min), max = tonumber(max) }
+end
+
+function lc.set_volume_param(scope, param)
+    local value = ""
+    if type(param) == "table" and param.min ~= nil and param.max ~= nil then
+        value = string.format("%.4f,%.4f", tonumber(param.min) or 0, tonumber(param.max) or 1)
+    end
+    cfg_set(string.format("VolR_%d", scope), value)
+end
+
+function lc.style_bypass_button(element, on)
+    lc.clear_appearance(element)
+    local c = on and lc.LEVEL_COLOR.bypass_on or lc.LEVEL_COLOR.bypass_off
+    set_element_border_color(element, c.r, c.g, c.b)
+    pcall(function()
+        element:Set("customtexttext", on and "B ON" or "B")
+    end)
+end
+
+function lc.get_bypass_flag()
+    return cfg_get_bool("Bypassed", false)
+end
+
+function lc.set_bypass_flag(on)
+    cfg_set("Bypassed", on and "1" or "0")
+end
+
+--- Recolour one fader (scope 0 = composition) after a level change.
+function lc.update_level_display(scope, kind, value)
+    local layout = DataPool().Layouts[LAYOUT_INDEX]
+    if layout == nil then
+        return
+    end
+    for _, element in ipairs(layout:Children()) do
+        local note = nil
+        pcall(function()
+            note = element.Note or element.note
+        end)
+        local s_scope, s_kind = lc.parse_level_note(note)
+        if s_scope == scope and s_kind == kind then
+            if kind == "bypass" then
+                lc.style_bypass_button(element, value and true or false)
+            else
+                lc.style_fader_button(element, scope, kind, value)
+            end
+        end
+    end
+end
+
+--- Build the X / B buttons and fader buttons left of the layer labels.
+function lc.add_layer_controls(layout, grid, first_macro_index)
+    local defs = lc.ensure_layer_control_macros(grid, first_macro_index)
+    local created = 0
+    local layer_count = grid.layer_count or 0
+
+    lc.set_level(0, "master", grid.master or 1)
+    for _, layer in ipairs(grid.layers or {}) do
+        lc.set_level(layer.index, "master", layer.master or 1)
+        lc.set_level(layer.index, "video", layer.opacity or 1)
+        lc.set_level(layer.index, "audio", lc.volume_to_fraction(layer.volume))
+        lc.set_volume_param(layer.index, layer.volume)
+    end
+    lc.set_bypass_flag(grid.bypassed)
+
+    local fw = lc.FADER_BTN_WIDTH
+    local gap = lc.FADER_GAP
+    local strip_w = lc.CTRL_BTN_WIDTH + gap + 3 * (fw + gap)
+    local x0 = ORIGIN_X - strip_w
+
+    local function row_y(scope)
+        if scope == 0 then
+            -- Composition row sits above the top layer (Y-up).
+            return ORIGIN_Y + (layer_count * (CELL_HEIGHT + CELL_GAP_Y))
+        end
+        local _, y = label_pos(scope, layer_count)
+        return y
+    end
+
+    local slots = { bypass = 0, master = 0, audio = 1, video = 2 }
+
+    for _, def in ipairs(defs) do
+        if def.macro_index then
+            local opts = {
+                y = row_y(def.scope),
+                height = CELL_HEIGHT,
+                text_size = 16,
+                border = 4,
+                note = lc.level_note(def.scope, def.kind, 0),
+            }
+            if def.kind == "clear" then
+                opts.x = x0
+                opts.width = lc.CTRL_BTN_WIDTH
+                opts.text = def.scope == 0 and "X ALL" or "X"
+                opts.text_size = def.scope == 0 and 14 or 24
+            else
+                local slot = slots[def.kind] or 0
+                if def.scope == 0 and def.kind == "master" then
+                    slot = 1 -- GM next to B
+                end
+                opts.x = x0 + lc.CTRL_BTN_WIDTH + gap + slot * (fw + gap)
+                opts.width = fw
+                opts.text = def.kind == "bypass" and "B"
+                    or lc.fader_label(def.scope, def.kind, lc.get_level(def.scope, def.kind))
+            end
+
+            local el = add_element(layout, opts)
+            if el then
+                assign_clip_trigger_macro(el, def.macro_index)
+                lc.center_text(el)
+                lc.dump_element_props(el)
+                if def.kind == "clear" then
+                    local c = lc.LEVEL_COLOR.clear
+                    lc.clear_appearance(el)
+                    set_element_border_color(el, c.r, c.g, c.b)
+                elseif def.kind == "bypass" then
+                    lc.style_bypass_button(el, grid.bypassed)
+                else
+                    lc.style_fader_button(el, def.scope, def.kind, lc.get_level(def.scope, def.kind))
+                end
+                created = created + 1
+            end
+        end
+    end
+
+    -- Composition label in the layer-label column.
+    local cx, _ = label_pos(1, layer_count)
+    local el = add_element(layout, {
+        x = cx,
+        y = row_y(0),
+        width = LABEL_WIDTH - CELL_GAP_X,
+        height = CELL_HEIGHT,
+        text = "COMPOSITION",
+        text_size = 14,
+        border = LAYER_BORDER_SIZE,
+        note = "resolume-layer:composition",
+    })
+    if el then
+        set_element_border_color(el, LAYER_BORDER_R, LAYER_BORDER_G, LAYER_BORDER_B)
+        created = created + 1
+    end
+    return created
+end
+
 local function build_layout(clips, grid, appearance_map)
     local layout, err = ensure_layout()
     if not layout then
@@ -2516,6 +3067,10 @@ local function build_layout(clips, grid, appearance_map)
         end
     end
 
+    if lc.SHOW_LAYER_CONTROLS then
+        created = created + lc.add_layer_controls(layout, grid, TRIGGER_MACRO_START + #clips)
+    end
+
     created = created + add_control_buttons(layout, layer_count)
     cleanup_stray_rcs_macro_elements(layout)
 
@@ -2544,6 +3099,7 @@ local function apply_element_playing_state(element, meta, playing)
     if name == "" then
         name = tostring(meta.id)
     end
+    lc.play_cache[meta.id] = playing
     local text = playing and ("> " .. name) or name
     pcall(function()
         element:Set("customtexttext", text)
@@ -2553,6 +3109,144 @@ local function apply_element_playing_state(element, meta, playing)
         )
     end)
     apply_playing_chrome(element, playing)
+end
+
+--- Mark the fired clip as playing (and its layer neighbours idle) right away,
+--- without waiting for the next poll round-trip to confirm it.
+local function apply_fired_highlight(layer, column)
+    local layout = DataPool().Layouts[LAYOUT_INDEX]
+    if layout == nil then
+        return
+    end
+    for _, element in ipairs(layout:Children()) do
+        local note = nil
+        pcall(function()
+            note = element.Note or element.note
+        end)
+        local meta = parse_clip_note(note)
+        -- layer nil = every layer (clear all); column nil = nothing playing.
+        if meta and (layer == nil or meta.layer == layer) then
+            local playing = column ~= nil and meta.column == column
+            local shown = lc.play_cache[meta.id]
+            if shown == nil then
+                shown = meta.playing
+            end
+            if playing ~= shown then
+                apply_element_playing_state(element, meta, playing)
+            end
+        end
+    end
+end
+
+function lc.layer_level_body(kind, value)
+    if kind == "video" then
+        return string.format('{"video":{"opacity":{"value":%.4f}}}', value)
+    elseif kind == "audio" then
+        return string.format('{"audio":{"volume":{"value":%.4f}}}', value)
+    end
+    return string.format('{"master":{"value":%.4f}}', value)
+end
+
+--- Run one queued control action. Returns true when Resolume accepted it.
+function lc.run_control_action(action)
+    local t0 = Time()
+    local ok, err, what
+
+    if action == "clearall" then
+        what = "clear all"
+        ok, err = http_post(lc.disconnect_all_url(), "", 2)
+        if ok then
+            apply_fired_highlight(nil, nil)
+        end
+    elseif action == "bypass" then
+        local on = not lc.get_bypass_flag()
+        what = on and "bypass ON" or "bypass OFF"
+        ok, err = lc.http_put(
+            composition_url(),
+            string.format('{"bypassed":{"value":%s}}', on and "true" or "false"),
+            2
+        )
+        if ok then
+            lc.set_bypass_flag(on)
+            lc.update_level_display(0, "bypass", on)
+        end
+    else
+        local clear_layer = action:match("^clear,(%d+)$")
+        local L, kind, step, raw = action:match("^lvl,(%d+),(%a+),([%d%.]+),(%-?[%d%.]+)$")
+        if clear_layer then
+            what = "clear L" .. clear_layer
+            ok, err = http_post(lc.layer_clear_url(clear_layer), "", 2)
+            if ok then
+                apply_fired_highlight(tonumber(clear_layer), nil)
+            end
+        elseif L then
+            L = tonumber(L)
+            what = string.format("L%d %s %s%%", L, kind, tostring(math.floor(tonumber(step) * 100 + 0.5)))
+            local url = L == 0 and composition_url() or layer_url(L)
+            ok, err = lc.http_put(url, lc.layer_level_body(kind, tonumber(raw) or 0), 2)
+            if ok then
+                lc.set_level(L, kind, tonumber(step) or 0)
+                lc.update_level_display(L, kind, tonumber(step) or 0)
+            end
+        else
+            Printf("MA3ArenaDeck: unknown control action '%s'", tostring(action))
+            return false
+        end
+    end
+
+    if ok then
+        Printf("MA3ArenaDeck: %s (%.2fs)", what, Time() - t0)
+        return true
+    end
+    Printf("MA3ArenaDeck: %s FAILED (%s)", tostring(what), tostring(err))
+    return false
+end
+
+--- Layer / composition control taps queued as ";action;action" in ACTION_VAR.
+function lc.process_pending_actions()
+    local v = nil
+    pcall(function()
+        v = GetVar(GlobalVars(), ACTION_VAR)
+    end)
+    if v == nil or v == "" or v == 0 or v == "0" then
+        return false
+    end
+    pcall(function()
+        SetVar(GlobalVars(), ACTION_VAR, "")
+    end)
+    -- A fader drag queues many levels for the same target: only send the
+    -- newest one per layer + parameter.
+    local actions = {}
+    local last_for = {}
+    for action in tostring(v):gmatch("[^;]+") do
+        actions[#actions + 1] = action
+        local key = action:match("^(lvl,%d+,%a+),")
+        if key then
+            last_for[key] = #actions
+        end
+    end
+    local any = false
+    for i, action in ipairs(actions) do
+        local key = action:match("^(lvl,%d+,%a+),")
+        if not key or last_for[key] == i then
+            if lc.run_control_action(action) then
+                any = true
+            end
+        end
+    end
+    return any
+end
+
+--- Fire a queued layout tap (if any) and show it immediately, then run any
+--- queued layer / composition controls. Returns true when something ran.
+local function handle_pending_fire()
+    local acted = lc.process_pending_actions()
+    local layer, column = process_pending_fire()
+    if not layer then
+        return acted
+    end
+    apply_fired_highlight(layer, column)
+    return true
 end
 
 --- Returns ok, err, changed, stats_table
@@ -2571,6 +3265,10 @@ local function update_playing_highlights()
         end)
         local meta = parse_clip_note(note)
         if meta then
+            local cached = lc.play_cache[meta.id]
+            if cached ~= nil then
+                meta.playing = cached
+            end
             clip_elements[#clip_elements + 1] = { element = element, meta = meta }
             if meta.layer and meta.layer > 0 then
                 layer_indexes[meta.layer] = true
@@ -2593,25 +3291,30 @@ local function update_playing_highlights()
 
     if #clip_metas > 0 then
         -- Prefer tiny per-clip requests (layer JSON was ~350KB each / ~3s).
-        states, err, bytes, requests = collect_connected_states_by_clips(clip_metas, 1.5)
-        if not states and layer_count > 0 then
-            mode = "layers-fallback"
-            states, err, bytes, requests = collect_connected_states_by_layers(layer_indexes, 2)
+        states, err, bytes, requests =
+            collect_connected_states_by_clips(clip_metas, 1.0, handle_pending_fire)
+        if err == POLL_ABORTED then
+            -- A tap fired mid-scan; these results are stale, re-poll right away.
+            return true, nil, 0, {
+                mode = "aborted",
+                fetch_s = Time() - t_fetch0,
+                apply_s = 0,
+                bytes = bytes or 0,
+                requests = requests or 0,
+                layers = layer_count,
+                clips = #clip_elements,
+                aborted = true,
+            }
         end
+        -- No layer/composition fallback here: those responses are hundreds
+        -- of KB and took several seconds each, blocking layout taps meanwhile.
         if not states then
-            mode = "composition-fallback"
-            local composition, comp_err, comp_bytes = fetch_composition(5)
-            if not composition then
-                return false, tostring(err or comp_err), 0, {
-                    mode = mode,
-                    fetch_s = Time() - t_fetch0,
-                    bytes = 0,
-                    requests = requests or 0,
-                }
-            end
-            states = collect_connected_states(composition)
-            bytes = comp_bytes or 0
-            requests = 1
+            return false, tostring(err), 0, {
+                mode = mode,
+                fetch_s = Time() - t_fetch0,
+                bytes = bytes or 0,
+                requests = requests or 0,
+            }
         end
     else
         mode = "composition"
@@ -2724,7 +3427,7 @@ local function run_monitor_loop()
         local gap_s = tick_start - last_tick_end
 
         -- Layout taps queue fires here (SetVar) so Plugin/Cleanup never runs.
-        process_pending_fire()
+        handle_pending_fire()
 
         local ok, err, changed, stats = update_playing_highlights()
         local tick_s = Time() - tick_start
@@ -2764,13 +3467,29 @@ local function run_monitor_loop()
             break
         end
 
+        -- Wait in short slices so a layout tap fires within ~FIRE_CHECK_SEC
+        -- instead of waiting out the whole poll interval. A tap ends the wait
+        -- early so the next poll confirms the new state at once. An aborted
+        -- poll (tap fired mid-scan) skips the wait entirely.
         interval = get_poll_interval()
-        local yield_ok = pcall(function()
-            coroutine.yield(interval)
-        end)
-        if not yield_ok then
-            local until_t = Time() + interval
-            while get_monitor_flag() and still_owner() and Time() < until_t do
+        local until_t = Time() + interval
+        local skip_wait = stats and stats.aborted
+        while not skip_wait and get_monitor_flag() and still_owner() do
+            if handle_pending_fire() then
+                break
+            end
+            local remaining = until_t - Time()
+            if remaining <= 0 then
+                break
+            end
+            local slice = math.min(FIRE_CHECK_SEC, remaining)
+            local yield_ok = pcall(function()
+                coroutine.yield(slice)
+            end)
+            if not yield_ok then
+                local slice_end = Time() + slice
+                while Time() < slice_end do
+                end
             end
         end
     end
@@ -2783,6 +3502,197 @@ local function run_monitor_loop()
     else
         Printf("MA3ArenaDeck: monitor instance replaced (after %d ticks)", tick)
     end
+end
+
+------------------------------------------------------------------------
+-- Fader popup
+------------------------------------------------------------------------
+
+--- Queue a level for the poll loop (same path as the layout buttons).
+function lc.queue_level(scope, kind, frac)
+    if frac < 0 then
+        frac = 0
+    elseif frac > 1 then
+        frac = 1
+    end
+    local raw = frac
+    if kind == "audio" then
+        raw = lc.fraction_to_volume(lc.get_volume_param(scope), frac)
+    end
+    local action = string.format("lvl,%d,%s,%.3f,%.4f", scope, kind, frac, raw)
+    pcall(function()
+        local cur = tostring(GetVar(GlobalVars(), ACTION_VAR) or "")
+        SetVar(GlobalVars(), ACTION_VAR, cur .. ";" .. action)
+    end)
+end
+
+--- UiFader values arrive as "50%" (or a number); return 0..1.
+function lc.parse_fader_value(v)
+    local n = tonumber(tostring(v or ""):match("%-?[%d%.]+"))
+    if n == nil then
+        return nil
+    end
+    if n > 1.0001 or tostring(v):find("%%") then
+        n = n / 100
+    end
+    return n
+end
+
+function lc.fader_title(scope, kind)
+    if scope == 0 then
+        return "Composition Grand Master"
+    end
+    local names = { master = "Master", audio = "Audio", video = "Video" }
+    return string.format("Layer %d %s", scope, names[kind] or kind)
+end
+
+--- Pop up a draggable fader for one layer / composition level.
+--- Returns true when the on-screen dialog was built.
+function lc.open_fader_dialog(scope, kind)
+    local current = lc.get_level(scope, kind)
+
+    local picked_up = false
+    local last_frac = nil
+    local signals = signalTable or {}
+    signals.MADFaderChanged = function(caller)
+        local value = nil
+        pcall(function()
+            value = caller.Value
+        end)
+        if value == nil then
+            pcall(function()
+                value = caller:Get("Value")
+            end)
+        end
+        local frac = lc.parse_fader_value(value)
+        if not frac then
+            return
+        end
+        -- Pick-up: the popup fader may open at 0 instead of the current
+        -- level. Send nothing until it reaches / crosses the current level,
+        -- so grabbing it never makes the picture or sound jump.
+        if not picked_up then
+            local near = math.abs(frac - current) <= 0.03
+            local crossed = last_frac ~= nil and (last_frac - current) * (frac - current) <= 0
+            last_frac = frac
+            if not (near or crossed) then
+                pcall(function()
+                    caller.Text = string.format(
+                        "%s -> %d%%",
+                        lc.fader_label(scope, kind, frac),
+                        math.floor(current * 100 + 0.5)
+                    )
+                end)
+                return
+            end
+            picked_up = true
+        end
+        pcall(function()
+            caller.Text = lc.fader_label(scope, kind, frac)
+        end)
+        lc.queue_level(scope, kind, frac)
+    end
+
+    local ok, err = pcall(function()
+        local display = GetFocusDisplay()
+        local overlay = display.ScreenOverlay
+        overlay:ClearUIChildren()
+
+        local base = overlay:Append("BaseInput")
+        base.Name = "MA3ArenaDeckFader"
+        base.W = 260
+        base.H = 620
+        base.Columns = 1
+        base.Rows = 2
+        base[1][1].SizePolicy = "Fixed"
+        base[1][1].Size = "60"
+        base[1][2].SizePolicy = "Stretch"
+        base.AutoClose = "No"
+        base.CloseOnEscape = "Yes"
+
+        local title = base:Append("TitleBar")
+        title.Columns = 2
+        title.Rows = 1
+        title.Anchors = "0,0"
+        title[2][2].SizePolicy = "Fixed"
+        title[2][2].Size = "50"
+        title.Texture = "corner2"
+
+        local caption = title:Append("TitleButton")
+        caption.Text = lc.fader_title(scope, kind)
+        caption.Texture = "corner1"
+        caption.Anchors = "0,0"
+
+        local close = title:Append("CloseButton")
+        close.Anchors = "1,0"
+        close.Texture = "corner2"
+
+        local frame = base:Append("DialogFrame")
+        frame.H = "100%"
+        frame.W = "100%"
+        frame.Columns = 1
+        frame.Rows = 1
+        frame.Anchors = { left = 0, right = 0, top = 1, bottom = 1 }
+
+        local fader = frame:Append("UiFader")
+        fader.Anchors = "0,0"
+        fader.Text = lc.fader_label(scope, kind, current)
+        fader.PluginComponent = myHandle
+        fader.Changed = "MADFaderChanged"
+        pcall(function()
+            local c = lc.LEVEL_COLOR[kind] or lc.LEVEL_COLOR.master
+            fader.Color = string.format("%.3f,%.3f,%.3f,1", c.r / 255, c.g / 255, c.b / 255)
+        end)
+        -- Start at the current level where the build allows setting it
+        -- (UiFader.Value is read-only on some versions; pick-up covers that).
+        local pct = math.floor(current * 100 + 0.5)
+        local set_ok = pcall(function()
+            fader.Value = pct
+        end)
+        if not set_ok then
+            set_ok = pcall(function()
+                fader:Set("Value", tostring(pct))
+            end)
+        end
+        if not set_ok then
+            pcall(function()
+                fader.Value = string.format("%d%%", pct)
+            end)
+        end
+        local start = nil
+        pcall(function()
+            start = lc.parse_fader_value(fader.Value)
+        end)
+        if start and math.abs(start - current) <= 0.03 then
+            picked_up = true
+        else
+            fader.Text = string.format(
+                "%s (%d%%)",
+                lc.fader_title(scope, kind),
+                pct
+            )
+        end
+    end)
+
+    if ok then
+        Printf("MA3ArenaDeck: fader popup %s", lc.fader_title(scope, kind))
+        return true
+    end
+
+    -- Fallback: type a value (0-100) when the UI objects are unavailable.
+    Printf("MA3ArenaDeck: fader popup failed (%s), asking for a value", tostring(err))
+    local typed = nil
+    pcall(function()
+        typed = TextInput(
+            lc.fader_title(scope, kind) .. " (0-100)",
+            tostring(math.floor(current * 100 + 0.5))
+        )
+    end)
+    local n = tonumber(typed)
+    if n then
+        lc.queue_level(scope, kind, n / 100)
+    end
+    return false
 end
 
 ------------------------------------------------------------------------
@@ -2804,6 +3714,7 @@ local function run_full_sync()
 
     print_clips(clips, composition, grid)
 
+    lc.delete_legacy_appearances()
     local appearance_map = sync_thumbnails(clips)
 
     Printf("MA3ArenaDeck: building Layout %d '%s'...", LAYOUT_INDEX, LAYOUT_NAME)
@@ -2867,6 +3778,18 @@ function Main(display_handle, argument)
     local trig_id = arg:match("^trigger%s+id%s+([%w%-]+)$")
     if trig_id then
         fire_resolume_clip(nil, nil, trig_id)
+        return
+    end
+
+    -- Layout M / A / V / GM buttons: open a fader popup, then keep polling
+    -- (this call replaces the running monitor) so fader moves are sent.
+    local fader_scope, fader_kind = arg:match("^fader%s+(%d+)%s+(%a+)$")
+    if fader_scope then
+        if not ensure_deps() then
+            return
+        end
+        lc.open_fader_dialog(tonumber(fader_scope), fader_kind)
+        run_monitor_loop()
         return
     end
 
