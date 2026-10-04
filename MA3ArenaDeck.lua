@@ -25,7 +25,7 @@ local signalTable = select(3, ...)
 local myHandle = select(4, ...)
 
 -- Bump when changing runtime behavior so System Monitor proves the reload.
-local PLUGIN_VERSION = "2026-10-04b"
+local PLUGIN_VERSION = "2026-10-04c"
 
 ------------------------------------------------------------------------
 -- Configuration (defaults; overridden by GlobalVars / setup dialog)
@@ -101,6 +101,13 @@ local BUTTON_ROW_OFFSET = 40
 -- Helpers / settings for layer controls and border colours live in one
 -- table: the main chunk is at the 200-local limit.
 local lc = {}
+-- clip id -> playing as last drawn by this monitor (so a redraw only
+-- happens on a real change, independent of reading the note back).
+lc.play_cache = {}
+-- layer -> next column position to probe when nothing is known to play there.
+lc.scan_cursor = {}
+-- Clip slots probed per layer per poll when no clip is known to play there.
+lc.SCAN_PER_TICK = 2
 
 -- Layer / composition controls left of the layer labels:
 --   [X] [M fader] [A fader] [V fader]   (one row per layer)
@@ -867,27 +874,50 @@ local function collect_connected_states_by_clips(clip_metas, timeout_sec, should
         return state, nil
     end
 
-    for _, metas in pairs(by_layer) do
+    -- Per layer: confirm the clip(s) we believe are playing (1 request).
+    -- Only when nothing plays there, probe a few other slots round-robin
+    -- instead of every slot each poll; a full scan of all clips every
+    -- 0.1 s kept MA3 busy and made the layout feel like it kept reloading.
+    -- Only one clip per Resolume layer can be Connected.
+    for layer, metas in pairs(by_layer) do
         table.sort(metas, function(a, b)
-            if a.playing == b.playing then
-                return (a.column or 0) < (b.column or 0)
-            end
-            return a.playing and not b.playing
+            return (a.column or 0) < (b.column or 0)
         end)
-
-        local connected_id = nil
         for _, meta in ipairs(metas) do
-            if connected_id then
-                states[tostring(meta.id)] = "Disconnected"
-            else
+            states[tostring(meta.id)] = "Disconnected"
+        end
+
+        local connected = false
+        for _, meta in ipairs(metas) do
+            if meta.playing and not connected then
                 local state, err = check_meta(meta)
                 if not state then
                     return nil, err, bytes, requests
                 end
-                if is_playing_state(state) then
-                    connected_id = tostring(meta.id)
+                connected = is_playing_state(state)
+            end
+        end
+
+        if not connected and #metas > 0 then
+            local cursor = lc.scan_cursor[layer] or 1
+            local probes = math.min(lc.SCAN_PER_TICK, #metas)
+            for _ = 1, probes do
+                if cursor > #metas then
+                    cursor = 1
+                end
+                local meta = metas[cursor]
+                cursor = cursor + 1
+                if not meta.playing then
+                    local state, err = check_meta(meta)
+                    if not state then
+                        return nil, err, bytes, requests
+                    end
+                    if is_playing_state(state) then
+                        break
+                    end
                 end
             end
+            lc.scan_cursor[layer] = cursor
         end
     end
 
@@ -1271,21 +1301,6 @@ local function set_appearance_back(appearance, r, g, b)
     end
 end
 
-local function style_playing_appearance(appearance)
-    -- Red background + subtle red tint for playing clips. MA3 Obj.Set wants strings.
-    set_appearance_back(appearance, PLAYING_BORDER_R, PLAYING_BORDER_G, PLAYING_BORDER_B)
-    local props = {
-        { "ImageR", "255" },
-        { "ImageG", "215" },
-        { "ImageB", "215" },
-    }
-    for _, p in ipairs(props) do
-        pcall(function()
-            appearance:Set(p[1], p[2])
-        end)
-    end
-end
-
 local function style_idle_appearance(appearance)
     set_appearance_back(appearance, IDLE_BORDER_R, IDLE_BORDER_G, IDLE_BORDER_B)
     local props = {
@@ -1492,11 +1507,8 @@ local function ensure_named_appearance(app_name, image_info, playing)
             app_index
         ))
     end
-    if playing then
-        style_playing_appearance(appearance)
-    else
-        style_idle_appearance(appearance)
-    end
+    -- Playing vs idle differ only by the red border, not the picture.
+    style_idle_appearance(appearance)
 
     return {
         index = app_index,
@@ -3070,6 +3082,7 @@ local function apply_element_playing_state(element, meta, playing)
     if name == "" then
         name = tostring(meta.id)
     end
+    lc.play_cache[meta.id] = playing
     local text = playing and ("> " .. name) or name
     pcall(function()
         element:Set("customtexttext", text)
@@ -3097,7 +3110,11 @@ local function apply_fired_highlight(layer, column)
         -- layer nil = every layer (clear all); column nil = nothing playing.
         if meta and (layer == nil or meta.layer == layer) then
             local playing = column ~= nil and meta.column == column
-            if playing ~= meta.playing then
+            local shown = lc.play_cache[meta.id]
+            if shown == nil then
+                shown = meta.playing
+            end
+            if playing ~= shown then
                 apply_element_playing_state(element, meta, playing)
             end
         end
@@ -3216,6 +3233,10 @@ local function update_playing_highlights()
         end)
         local meta = parse_clip_note(note)
         if meta then
+            local cached = lc.play_cache[meta.id]
+            if cached ~= nil then
+                meta.playing = cached
+            end
             clip_elements[#clip_elements + 1] = { element = element, meta = meta }
             if meta.layer and meta.layer > 0 then
                 layer_indexes[meta.layer] = true
