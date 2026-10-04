@@ -1,12 +1,8 @@
-# ResArena Control for MA3
-
-*Based on **MA3ArenaDeck** by Simon Kotting (MIT License).*
-
-*Works with Resolume Arena / Avenue. Resolume, Arena and Avenue are trademarks of Resolume; grandMA3 is a trademark of MA Lighting. This project is not affiliated with or endorsed by either company.*
+# MA3ArenaDeck
 
 **Resolume composition grid for grandMA3**
 
-ResArena Control for MA3 mirrors your Resolume Arena / Avenue clip deck on a grandMA3 layout: thumbnails, live “what’s playing” highlights, and optional tap-to-trigger control from the console.
+MA3ArenaDeck mirrors your Resolume Arena / Avenue clip deck on a grandMA3 layout: thumbnails, live “what’s playing” highlights, and optional tap-to-trigger control from the console.
 
 Ideal for busking, hybrid lighting + video shows, and keeping the media operator’s deck visible (and optionally playable) on the lighting surface.
 
@@ -39,7 +35,7 @@ Lua HTTP modules shipped with grandMA3 (`http`, `ltn12`, `json`) are used; no ex
 
 ## Network & Resolume webserver (important)
 
-ResArena Control for MA3 talks to Resolume over **HTTP**. The grandMA3 system must be able to open a TCP connection to Resolume’s webserver address and port.
+MA3ArenaDeck talks to Resolume over **HTTP**. The grandMA3 system must be able to open a TCP connection to Resolume’s webserver address and port.
 
 1. On the Resolume machine: **Preferences → Webserver**
 2. Enable **Webserver & REST API**
@@ -54,11 +50,11 @@ Official Resolume documentation:
 
 Resolume’s default webserver port is often **8080**. grandMA3 also commonly uses **8080**.
 
-If both run on the **same computer**, change Resolume’s listen port (for example to **8090**) and enter that port in ResArena Control for MA3’s setup dialog. The plugin default is Resolume’s usual `127.0.0.1:8080` — only change it when 8080 is already taken (e.g. by grandMA3).
+If both run on the **same computer**, change Resolume’s listen port (for example to **8090**) and enter that port in MA3ArenaDeck’s setup dialog. The plugin default is Resolume’s usual `127.0.0.1:8080` — only change it when 8080 is already taken (e.g. by grandMA3).
 
 ### Different machines
 
-- Put Resolume’s **LAN IP** in ResArena Control for MA3 (not only `127.0.0.1` — that always means “this machine”)
+- Put Resolume’s **LAN IP** in MA3ArenaDeck (not only `127.0.0.1` — that always means “this machine”)
 - Allow the port through the OS firewall on the Resolume PC
 - Both machines must be on a network that can route to each other (same subnet is simplest)
 
@@ -68,24 +64,24 @@ If both run on the **same computer**, change Resolume’s listen port (for examp
 
 1. Copy this folder into your grandMA3 plugins library as:
 
-   `…/gma3_library/datapools/plugins/ResArenaControl/`
+   `…/gma3_library/datapools/plugins/MA3ArenaDeck/`
 
 2. Files expected:
 
    | File | Role |
    | --- | --- |
-   | `ResArenaControl.xml` | Plugin definition (import this) |
-   | `ResArenaControl.lua` | Plugin code |
+   | `MA3ArenaDeck.xml` | Plugin definition (import this) |
+   | `MA3ArenaDeck.lua` | Plugin code |
    | `LICENSE` | MIT license |
    | `README.md` | This document |
 
-3. In grandMA3: **Import** `ResArenaControl.xml` into the **Plugin** pool.
+3. In grandMA3: **Import** `MA3ArenaDeck.xml` into the **Plugin** pool.
 
 4. On the ComponentLua object, set:
 
    - **Installed** = **Yes**
-   - **FileName** = `ResArenaControl.lua`
-   - **Path** = `ResArenaControl` (must match the folder name under `datapools/plugins`)
+   - **FileName** = `MA3ArenaDeck.lua`
+   - **Path** = `MA3ArenaDeck` (must match the folder name under `datapools/plugins`)
 
 5. Keep the plugin **external** (`Installed = Yes`). Pasting the full Lua into the showfile editor can hit a size limit and will not update from disk.
 
@@ -98,9 +94,9 @@ If both run on the **same computer**, change Resolume’s listen port (for examp
 ## Quick start
 
 1. Enable the Resolume webserver (see above) and load a composition with clips.
-2. Tap the **ResArena Control for MA3** plugin in the Plugin pool → choose **Install** → setup dialog opens.
+2. Tap the **MA3ArenaDeck** plugin in the Plugin pool → setup dialog opens.
 3. Set **Host** / **Port** (and layout / pool starts if you need non-defaults) → **Sync**.
-4. Open **Layout** (default: Layout 1, labelled *ResArena*).
+4. Open **Layout** (default: Layout 1, labelled *MA3ArenaDeck*).
 5. Tap **POLL ON** to follow playing clips, or **TRIG ON** to also fire clips from the layout (poll starts automatically with trigger).
 
 ---
@@ -138,7 +134,7 @@ With **TRIG ON**, a tapped clip is sent to Resolume within a few tens of millise
 
 ## Setup dialog options
 
-Opened when you run the plugin from the pool (no argument) and pick **Install**. The poll interval is set with the **POLL x.xxs** layout button, not here.
+Opened when you run the plugin from the pool (no argument):
 
 | Field | Meaning |
 | --- | --- |
@@ -146,15 +142,12 @@ Opened when you run the plugin from the pool (no argument) and pick **Install**.
 | Port | Resolume webserver port |
 | Layout Index / Name | Where the grid is built |
 | Image / Appearance / Macro start | Pool indexes used for generated objects |
+| Poll interval | Default polling period |
 | Fetch thumbnails | Import PNG thumbs from Resolume |
 | Only clips with thumbnail | Skip empty / default slots |
 | Highlight previewing | Also treat “Previewing” as active |
 
 Use **Sync** to save and rebuild, **Save Only** to store settings without rebuilding, or **Cancel**.
-
-### Uninstall
-
-Tapping the plugin first shows **Install / Uninstall / Cancel**. **Uninstall** (after a confirm) removes everything the plugin created: the layout (only if it still has the configured name), every `Res_*` macro, `Res_*` / `ResP_*` appearance and `Res_*` image (plus old `MAD_*` / `MADP_*` ones from MA3ArenaDeck) in the configured pool ranges, the thumbnail PNG files in the user image library, and all saved `ResArena_*` (and old `MA3ArenaDeck_*`) settings. Objects with other names in those ranges are left alone.
 
 ---
 
@@ -164,7 +157,7 @@ Useful if you call the plugin from your own macros:
 
 | Argument | Effect |
 | --- | --- |
-| *(none)* / `setup` | Install / Uninstall / Cancel, then setup dialog or uninstall |
+| *(none)* / `setup` | Setup dialog, then sync if confirmed |
 | `sync` | Full sync (no dialog) |
 | `monitor` | Start poll loop |
 | `stop` | Stop poll loop |
@@ -174,8 +167,8 @@ Useful if you call the plugin from your own macros:
 Example:
 
 ```text
-Plugin "ResArena Control for MA3" "sync"
-Plugin "ResArena Control for MA3" "monitor"
+Plugin "MA3ArenaDeck" "sync"
+Plugin "MA3ArenaDeck" "monitor"
 ```
 
 ---
@@ -195,7 +188,7 @@ Plugin "ResArena Control for MA3" "monitor"
 | --- | --- |
 | Setup / sync cannot reach Resolume | Webserver enabled; host/port; firewall; browser test from the MA3 PC |
 | Works on Resolume PC but not from console | Use LAN IP, not `127.0.0.1`; same network / routing |
-| Port already in use / odd HTTP failures on one machine | Change Resolume off **8080** (MA conflict); set the new port in ResArena Control for MA3 |
+| Port already in use / odd HTTP failures on one machine | Change Resolume off **8080** (MA conflict); set the new port in MA3ArenaDeck |
 | Plugin changes not loading | `Installed = Yes`, external `.lua`, then `ReloadAllPlugins` |
 | Layout buttons missing / wrong | Run **SYNC** once after install or after changing macro start index |
 | Tap does nothing | **TRIG ON**; then **SYNC** once so clip fire macros are rebuilt |
@@ -206,7 +199,7 @@ Plugin "ResArena Control for MA3" "monitor"
 
 ## Privacy & safety
 
-- ResArena Control for MA3 only contacts the Resolume host/port you configure.
+- MA3ArenaDeck only contacts the Resolume host/port you configure.
 - Trigger mode sends clip **connect** commands to Resolume — disable **TRIG** for monitor-only operation.
 - Generated Images, Appearances, Macros, and Layout content live in your showfile / pools; review pool start indexes before large shows.
 
@@ -216,14 +209,8 @@ Plugin "ResArena Control for MA3" "monitor"
 
 This project is licensed under the [MIT License](LICENSE).
 
-It is a modified version of **MA3ArenaDeck**, Copyright (c) 2026 Simon Kotting, used under the MIT License. As that license requires, the original copyright notice and permission notice are kept in [LICENSE](LICENSE) and must be included in all copies or substantial portions of the software.
-
 ---
 
 ## Credits
-
-- Original plugin: **MA3ArenaDeck** by Simon Kotting (MIT License).
-- Modifications (layout controls, faders, Install/Uninstall, naming): Sedat.
-
 
 Built for grandMA3 + Resolume Arena/Avenue workflows using the [Resolume REST API](https://www.resolume.com/support/en/restapi).

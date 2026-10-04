@@ -4,22 +4,22 @@
       External plugin (not embedded in the showfile).
 
       Install folder (recommended):
-        gma3_library/datapools/plugins/ResArenaControl/
+        gma3_library/datapools/plugins/MA3ArenaDeck/
 
       Import this XML, then verify on the ComponentLua:
         - Installed = Yes
-        - FileName  = ResArenaControl.lua
-        - Path      = ResArenaControl   (must match the folder name)
+        - FileName  = MA3ArenaDeck.lua
+        - Path      = MA3ArenaDeck   (must match the folder name)
 
       After editing the .lua on disk:
         ReloadAllPlugins
-      You should see: ResArena: v... starting
+      You should see: MA3ArenaDeck: v... starting
 
       NOTE: Paste/import into the Lua editor embeds the code (InStream).
       That path has a size limit and ReloadAllPlugins will NOT pick up
       disk edits. Keep Installed=Yes / external file.
     -->
-    <UserPlugin Name="ResArena Control for MA3" Version="0.2.0.0" Author="Sedat (based on MA3ArenaDeck by Simon Kotting)" Path="ResArenaControl">
-        <ComponentLua Name="ResArenaControl" FileName="ResArenaControl.lua"/>
+    <UserPlugin Name="MA3ArenaDeck" Version="0.1.0.0" Author="Simon Kotting" Path="MA3ArenaDeck">
+        <ComponentLua Name="MA3ArenaDeck" FileName="MA3ArenaDeck.lua"/>
     </UserPlugin>
 </GMA3>

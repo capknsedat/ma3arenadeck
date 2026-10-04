@@ -1,5 +1,5 @@
--- Plugin: ResArena Control for MA3 (Resolume composition grid for grandMA3)
--- Based on MA3ArenaDeck, Copyright (c) 2026 Simon Kotting — MIT License (see LICENSE)
+-- Plugin: MA3ArenaDeck (Resolume composition grid for grandMA3)
+-- Copyright (c) 2026 Simon Kotting — MIT License (see LICENSE)
 -- Fetches the current Resolume composition, builds a layout grid, imports
 -- clip thumbnails as Images/Appearances, and can poll connected state to
 -- highlight currently running clips.
@@ -25,12 +25,12 @@ local signalTable = select(3, ...)
 local myHandle = select(4, ...)
 
 -- Bump when changing runtime behavior so System Monitor proves the reload.
-local PLUGIN_VERSION = "2026-10-04m"
+local PLUGIN_VERSION = "2026-10-04n"
 
 ------------------------------------------------------------------------
 -- Configuration (defaults; overridden by GlobalVars / setup dialog)
 ------------------------------------------------------------------------
-local CFG_PREFIX = "ResArena_"
+local CFG_PREFIX = "MA3ArenaDeck_"
 local MONITOR_VAR = CFG_PREFIX .. "Monitor"
 local MONITOR_OWNER_VAR = CFG_PREFIX .. "MonitorOwner"
 local INTERVAL_VAR = CFG_PREFIX .. "PollInterval"
@@ -47,7 +47,7 @@ local RESOLUME_PORT = 8080
 local ONLY_WITH_THUMBNAIL = false
 
 local LAYOUT_INDEX = 1
-local LAYOUT_NAME = "ResArena"
+local LAYOUT_NAME = "MA3ArenaDeck"
 
 local CELL_WIDTH = 160
 local CELL_HEIGHT = 90
@@ -64,9 +64,9 @@ local IMAGE_POOL = 3
 local IMAGE_START_INDEX = 200
 local APPEARANCE_START_INDEX = 200
 local MAX_MEDIA_SLOTS = 300
-local IMAGE_NAME_PREFIX = "Res_"
-local APPEARANCE_IDLE_PREFIX = "Res_"
-local APPEARANCE_PLAY_PREFIX = "ResP_"
+local IMAGE_NAME_PREFIX = "MAD_"
+local APPEARANCE_IDLE_PREFIX = "MAD_"
+local APPEARANCE_PLAY_PREFIX = "MADP_"
 
 -- Status polling
 local POLL_INTERVAL_SEC = 0.25
@@ -159,7 +159,7 @@ local function ensure_deps()
 
     if not (ok_http and ok_ltn12 and ok_json) then
         Printf(
-            "ResArena ERROR: missing Lua modules (http=%s, ltn12=%s, json=%s)",
+            "MA3ArenaDeck ERROR: missing Lua modules (http=%s, ltn12=%s, json=%s)",
             tostring(ok_http),
             tostring(ok_ltn12),
             tostring(ok_json)
@@ -179,12 +179,7 @@ end
 
 local function cfg_get(key, default)
     local ok, v = pcall(function()
-        local cur = GetVar(GlobalVars(), CFG_PREFIX .. key)
-        if cur == nil or cur == "" then
-            -- Settings saved by MA3ArenaDeck before the rename.
-            cur = GetVar(GlobalVars(), "MA3ArenaDeck_" .. key)
-        end
-        return cur
+        return GetVar(GlobalVars(), CFG_PREFIX .. key)
     end)
     if not ok or v == nil or v == "" then
         return default
@@ -297,10 +292,10 @@ end
 --- Returns: "sync" | "save" | "cancel"
 local function show_setup_dialog(display_handle)
     load_config()
-    Printf("ResArena: opening setup dialog...")
+    Printf("MA3ArenaDeck: opening setup dialog...")
 
     local options = {
-        title = "ResArena Control for MA3 Setup",
+        title = "MA3ArenaDeck Setup",
         message = "Set Resolume host/port and MA3 pool slots, then Sync.\n\n"
             .. "Note: Resolume's default webserver port is 8080, which grandMA3 "
             .. "also uses by default. If both run on the same machine, change "
@@ -344,6 +339,12 @@ local function show_setup_dialog(display_handle)
                 whiteFilter = "0123456789",
                 vkPlugin = "TextInputNumOnly",
             },
+            {
+                name = "08 Poll Interval (s)",
+                value = string.format("%.2f", get_poll_interval()),
+                whiteFilter = "0123456789.",
+                vkPlugin = "TextInputNumOnly",
+            },
         },
         states = {
             { name = "Fetch thumbnails", state = FETCH_THUMBNAILS and true or false },
@@ -359,10 +360,10 @@ local function show_setup_dialog(display_handle)
 
     local ok, result = pcall(MessageBox, options)
     if not ok then
-        Printf("ResArena: MessageBox failed: %s", tostring(result))
+        Printf("MA3ArenaDeck: MessageBox failed: %s", tostring(result))
         -- Retry with a minimal dialog (some builds dislike states/inputs combo).
         ok, result = pcall(MessageBox, {
-            title = "ResArena Control for MA3 Setup",
+            title = "MA3ArenaDeck Setup",
             message = string.format(
                 "Host=%s  Port=%d  Layout=%d\nEdit values in code/GlobalVars if this dialog is limited.\n\nContinue with Sync?",
                 RESOLUME_HOST,
@@ -375,7 +376,7 @@ local function show_setup_dialog(display_handle)
             },
         })
         if not ok or type(result) ~= "table" then
-            Printf("ResArena: setup dialog unavailable")
+            Printf("MA3ArenaDeck: setup dialog unavailable")
             return "cancel"
         end
         local cmd = tonumber(result.result)
@@ -389,11 +390,11 @@ local function show_setup_dialog(display_handle)
     end
 
     if type(result) ~= "table" then
-        Printf("ResArena: MessageBox returned %s", type(result))
+        Printf("MA3ArenaDeck: MessageBox returned %s", type(result))
         return "cancel"
     end
     if result.success == false then
-        Printf("ResArena: setup cancelled")
+        Printf("MA3ArenaDeck: setup cancelled")
         return "cancel"
     end
 
@@ -410,7 +411,7 @@ local function show_setup_dialog(display_handle)
     end
     cmd = cmd or 0
     if cmd == 0 then
-        Printf("ResArena: setup cancelled")
+        Printf("MA3ArenaDeck: setup cancelled")
         return "cancel"
     end
 
@@ -425,13 +426,16 @@ local function show_setup_dialog(display_handle)
     MACRO_START_INDEX = tonumber(mb_input(result, "07 Macro Start", MACRO_START_INDEX))
         or MACRO_START_INDEX
     refresh_derived_indexes()
+    POLL_INTERVAL_SEC = nearest_poll_interval(
+        mb_input(result, "08 Poll Interval (s)", POLL_INTERVAL_SEC)
+    )
     FETCH_THUMBNAILS = mb_state(result, "Fetch thumbnails", FETCH_THUMBNAILS)
     ONLY_WITH_THUMBNAIL = mb_state(result, "Only clips with thumbnail", ONLY_WITH_THUMBNAIL)
     HIGHLIGHT_PREVIEWING = mb_state(result, "Highlight previewing", HIGHLIGHT_PREVIEWING)
 
     save_config()
     Printf(
-        "ResArena: config saved (%s:%d, Layout %d, poll %.2fs)",
+        "MA3ArenaDeck: config saved (%s:%d, Layout %d, poll %.2fs)",
         RESOLUME_HOST,
         RESOLUME_PORT,
         LAYOUT_INDEX,
@@ -1180,8 +1184,8 @@ local function delete_image_slot(images, image_index)
 end
 
 --- Import via the one path this build accepts without Illegal object spam:
----   Import Image Library "Res_….png.xml" At Image 3.N
---- Do not try embedded Res_….xml library import — that logs Illegal object.
+---   Import Image Library "MAD_….png.xml" At Image 3.N
+--- Do not try embedded MAD_….xml library import — that logs Illegal object.
 local function try_import_image(images, image_index, files)
     delete_image_slot(images, image_index)
 
@@ -1262,7 +1266,7 @@ local function import_image_to_pool(clip, png_data)
     end)
 
     Printf(
-        "ResArena: image import Image %d.%d via %s (%d bytes)",
+        "MA3ArenaDeck: image import Image %d.%d via %s (%d bytes)",
         IMAGE_POOL,
         image_index,
         tostring(method),
@@ -1433,7 +1437,7 @@ local function set_element_border_color(element, r, g, b)
         then
             border_color_way = i
             Printf(
-                "ResArena: border colour via %s (%s) -> '%s'",
+                "MA3ArenaDeck: border colour via %s (%s) -> '%s'",
                 way.prop,
                 way.fmt,
                 tostring(lc.read_element_prop(element, way.prop))
@@ -1447,7 +1451,7 @@ local function set_element_border_color(element, r, g, b)
     if not border_color_logged then
         border_color_logged = true
         Printf(
-            "ResArena: border colour not confirmed (BorderColor was '%s', now '%s'); using appearance colours",
+            "MA3ArenaDeck: border colour not confirmed (BorderColor was '%s', now '%s'); using appearance colours",
             tostring(before),
             tostring(lc.read_element_prop(element, "BorderColor"))
         )
@@ -1611,7 +1615,7 @@ local function sync_thumbnails(clips)
     local skip_count = 0
     local fail_count = 0
 
-    Printf("ResArena: importing thumbnails / appearances...")
+    Printf("MA3ArenaDeck: importing thumbnails / appearances...")
 
     for _, clip in ipairs(clips) do
         local media, err
@@ -1651,7 +1655,7 @@ local function sync_thumbnails(clips)
     end
 
     Printf(
-        "ResArena: media done (ok=%d no-thumb=%d fail=%d)",
+        "MA3ArenaDeck: media done (ok=%d no-thumb=%d fail=%d)",
         ok_count,
         skip_count,
         fail_count
@@ -1763,7 +1767,7 @@ local function ensure_control_macros()
     local defs = {
         {
             index = MACRO_START_INDEX,
-            name = "Res_Sync",
+            name = "MAD_Sync",
             note = "resolume-ctrl:sync",
             lines = {
                 string.format('Lua "SetVar(GlobalVars(), \'%s\', 0)"', MONITOR_VAR),
@@ -1773,7 +1777,7 @@ local function ensure_control_macros()
         },
         {
             index = MACRO_START_INDEX + 1,
-            name = "Res_PollOn",
+            name = "MAD_PollOn",
             note = "resolume-ctrl:monitor",
             lines = {
                 plugin_command("monitor"),
@@ -1781,7 +1785,7 @@ local function ensure_control_macros()
         },
         {
             index = MACRO_START_INDEX + 2,
-            name = "Res_PollOff",
+            name = "MAD_PollOff",
             note = "resolume-ctrl:stop",
             -- Clear flag immediately (interrupts loop), then plugin stop for UI chrome.
             lines = {
@@ -1791,7 +1795,7 @@ local function ensure_control_macros()
         },
         {
             index = MACRO_START_INDEX + 3,
-            name = "Res_Interval",
+            name = "MAD_Interval",
             note = "resolume-ctrl:interval",
             lines = {
                 plugin_command("interval"),
@@ -1799,7 +1803,7 @@ local function ensure_control_macros()
         },
         {
             index = MACRO_START_INDEX + 4,
-            name = "Res_TrigToggle",
+            name = "MAD_TrigToggle",
             note = "resolume-ctrl:trigger",
             lines = {
                 plugin_command("trigtoggle"),
@@ -1810,7 +1814,7 @@ local function ensure_control_macros()
     for _, def in ipairs(defs) do
         local macro = ensure_macro(def.index)
         if macro == nil then
-            Printf("ResArena: could not create Macro %d '%s'", def.index, def.name)
+            Printf("MA3ArenaDeck: could not create Macro %d '%s'", def.index, def.name)
             return nil, string.format("Could not create Macro %d", def.index)
         end
         macro:Set("Name", def.name)
@@ -1821,7 +1825,7 @@ local function ensure_control_macros()
             line_count = #macro:Children()
         end)
         Printf(
-            "ResArena: Macro %d '%s' ready (%d lines)",
+            "MA3ArenaDeck: Macro %d '%s' ready (%d lines)",
             def.index,
             def.name,
             line_count
@@ -1851,7 +1855,7 @@ local function ensure_clip_trigger_macros(clips)
         local macro = ensure_macro(macro_index)
         if macro == nil then
             Printf(
-                "ResArena: could not create trigger Macro %d (clip L%d C%d)",
+                "MA3ArenaDeck: could not create trigger Macro %d (clip L%d C%d)",
                 macro_index,
                 tonumber(clip.layer) or 1,
                 tonumber(clip.column) or 1
@@ -1859,7 +1863,7 @@ local function ensure_clip_trigger_macros(clips)
         else
             local layer = tonumber(clip.layer) or 1
             local column = tonumber(clip.column) or 1
-            local name = string.format("Res_Fire_L%dC%d", layer, column)
+            local name = string.format("MAD_Fire_L%dC%d", layer, column)
             macro:Set("Name", name)
             write_macro_lines(macro, macro_index, {
                 -- Third field = tap time, so the log shows how long the tap waited.
@@ -1875,7 +1879,7 @@ local function ensure_clip_trigger_macros(clips)
     end
 
     Printf(
-        "ResArena: clip trigger macros ready (%d, start=%d)",
+        "MA3ArenaDeck: clip trigger macros ready (%d, start=%d)",
         #clips,
         TRIGGER_MACRO_START
     )
@@ -1957,9 +1961,9 @@ function lc.ensure_layer_control_macros(grid, first_index)
         })
     end
 
-    add({ scope = 0, kind = "clear", line = lc.action_macro_line("clearall"), name = "Res_ClearAll" })
-    add({ scope = 0, kind = "bypass", line = lc.action_macro_line("bypass"), name = "Res_Bypass" })
-    fader(0, "master", "Res_GrandMaster")
+    add({ scope = 0, kind = "clear", line = lc.action_macro_line("clearall"), name = "MAD_ClearAll" })
+    add({ scope = 0, kind = "bypass", line = lc.action_macro_line("bypass"), name = "MAD_Bypass" })
+    fader(0, "master", "MAD_GrandMaster")
 
     for _, layer in ipairs(grid.layers or {}) do
         local L = layer.index
@@ -1967,10 +1971,10 @@ function lc.ensure_layer_control_macros(grid, first_index)
             scope = L,
             kind = "clear",
             line = lc.action_macro_line(string.format("clear,%d", L)),
-            name = string.format("Res_L%d_Clear", L),
+            name = string.format("MAD_L%d_Clear", L),
         })
         for _, kind in ipairs({ "master", "audio", "video" }) do
-            fader(L, kind, string.format("Res_L%d_%s", L, kind:sub(1, 1):upper()))
+            fader(L, kind, string.format("MAD_L%d_%s", L, kind:sub(1, 1):upper()))
         end
     end
 
@@ -1980,7 +1984,7 @@ function lc.ensure_layer_control_macros(grid, first_index)
     for _, def in ipairs(defs) do
         local macro = ensure_macro(def.macro_index)
         if macro == nil then
-            Printf("ResArena: could not create control Macro %d", def.macro_index)
+            Printf("MA3ArenaDeck: could not create control Macro %d", def.macro_index)
             def.macro_index = nil
         else
             macro:Set("Name", def.name)
@@ -1988,7 +1992,7 @@ function lc.ensure_layer_control_macros(grid, first_index)
         end
     end
     Printf(
-        "ResArena: layer control macros ready (%d, start=%d)",
+        "MA3ArenaDeck: layer control macros ready (%d, start=%d)",
         #defs,
         first_index
     )
@@ -2005,7 +2009,7 @@ local function print_clips(clips, composition, grid)
         comp_name = param_value(composition.name, "unknown")
     end
 
-    Printf("ResArena ----------------------------------------")
+    Printf("MA3ArenaDeck ----------------------------------------")
     Printf("Host: %s:%d", RESOLUME_HOST, RESOLUME_PORT)
     Printf("Composition: %s", tostring(comp_name))
     Printf("Available clips: %d", #clips)
@@ -2118,7 +2122,7 @@ function lc.delete_legacy_appearances()
         end
     end
     if removed > 0 then
-        Printf("ResArena: removed %d old button appearances", removed)
+        Printf("MA3ArenaDeck: removed %d old button appearances", removed)
     end
 end
 
@@ -2202,7 +2206,7 @@ function lc.dump_element_props(element)
             end
         end)
     end
-    Printf("ResArena: element props: %s", table.concat(parts, " | "))
+    Printf("MA3ArenaDeck: element props: %s", table.concat(parts, " | "))
 end
 
 local function assign_appearance(element, appearance_info)
@@ -2283,8 +2287,8 @@ local function cleanup_stray_rcs_macro_elements(layout)
         local is_ctrl_button = type(note) == "string" and note:find("^resolume%-ctrl:") ~= nil
         local is_clip = type(note) == "string" and note:find("^resolume%-clip:") ~= nil
         local is_level = type(note) == "string" and note:find("^resolume%-lvl:") ~= nil
-        -- Clip cells may have Res_Fire_* macros assigned when trigger mode is on;
-        -- layer / composition control cells always carry their Res_* macro.
+        -- Clip cells may have MAD_Fire_* macros assigned when trigger mode is on;
+        -- layer / composition control cells always carry their MAD_* macro.
         if not is_ctrl_button and not is_clip and not is_level then
             local obj_name = ""
             pcall(function()
@@ -2299,10 +2303,10 @@ local function cleanup_stray_rcs_macro_elements(layout)
                 end)
             end
 
-            if obj_name:find("^Res_") ~= nil or obj_name:find("^MAD_") ~= nil then
+            if obj_name:find("^MAD_") ~= nil then
                 layout:Delete(i)
                 removed = removed + 1
-                Printf("ResArena: removed stray '%s' from layout", obj_name)
+                Printf("MA3ArenaDeck: removed stray '%s' from layout", obj_name)
             end
         end
     end
@@ -2452,7 +2456,7 @@ local function place_control_macro(layout, macro_index, geo)
 
     local macro = DataPool().Macros[macro_index]
     if macro == nil then
-        Printf("ResArena: Macro %d missing", macro_index)
+        Printf("MA3ArenaDeck: Macro %d missing", macro_index)
         return false
     end
 
@@ -2497,7 +2501,7 @@ local function place_control_macro(layout, macro_index, geo)
 
     if target == nil then
         Printf(
-            "ResArena: Assign Macro %d did not create a layout element",
+            "MA3ArenaDeck: Assign Macro %d did not create a layout element",
             macro_index
         )
         return false
@@ -2518,7 +2522,7 @@ local function place_control_macro(layout, macro_index, geo)
     end)
 
     Printf(
-        "ResArena: button Macro %d -> Layout %d.%s (%s)",
+        "MA3ArenaDeck: button Macro %d -> Layout %d.%s (%s)",
         macro_index,
         LAYOUT_INDEX,
         tostring(child_index or "?"),
@@ -2663,12 +2667,12 @@ local function toggle_trigger_mode()
     local n = apply_trigger_mode_to_layout(enabled)
     update_control_button_styles()
     Printf(
-        "ResArena: trigger mode %s (%d clip elements)",
+        "MA3ArenaDeck: trigger mode %s (%d clip elements)",
         enabled and "ON" or "OFF",
         n
     )
     pcall(function()
-        Echo(string.format("ResArena: TRIG %s", enabled and "ON" or "OFF"))
+        Echo(string.format("MA3ArenaDeck: TRIG %s", enabled and "ON" or "OFF"))
     end)
     return enabled
 end
@@ -2697,7 +2701,7 @@ local function process_pending_fire()
     if ok then
         local waited = tonumber(tapped_at) and (t_post - tonumber(tapped_at)) or -1
         Printf(
-            "ResArena: triggered L%d C%d (tap waited %.2fs, POST %.2fs)",
+            "MA3ArenaDeck: triggered L%d C%d (tap waited %.2fs, POST %.2fs)",
             tonumber(layer) or 0,
             tonumber(column) or 0,
             waited,
@@ -2706,7 +2710,7 @@ local function process_pending_fire()
         return tonumber(layer), tonumber(column)
     end
 
-    Printf("ResArena: trigger FAILED (%s)", tostring(err))
+    Printf("MA3ArenaDeck: trigger FAILED (%s)", tostring(err))
     return nil
 end
 
@@ -2720,7 +2724,7 @@ local function fire_resolume_clip(layer, column, clip_id)
         ok, err = http_post(clip_connect_url(layer, column), "", 2)
         if ok then
             Printf(
-                "ResArena: triggered L%d C%d",
+                "MA3ArenaDeck: triggered L%d C%d",
                 tonumber(layer) or 0,
                 tonumber(column) or 0
             )
@@ -2731,12 +2735,12 @@ local function fire_resolume_clip(layer, column, clip_id)
     if clip_id then
         ok, err = http_post(clip_connect_by_id_url(clip_id), "", 2)
         if ok then
-            Printf("ResArena: triggered clip id %s", tostring(clip_id))
+            Printf("MA3ArenaDeck: triggered clip id %s", tostring(clip_id))
             return true
         end
     end
 
-    Printf("ResArena: trigger FAILED (%s)", tostring(err))
+    Printf("MA3ArenaDeck: trigger FAILED (%s)", tostring(err))
     return false
 end
 
@@ -2784,7 +2788,7 @@ local function add_control_buttons(layout, layer_count)
         if place_control_macro(layout, btn.macro.index, geo) then
             created = created + 1
         else
-            Printf("ResArena: failed to wire button '%s'", btn.label)
+            Printf("MA3ArenaDeck: failed to wire button '%s'", btn.label)
         end
     end
 
@@ -3185,16 +3189,16 @@ function lc.run_control_action(action)
                 lc.update_level_display(L, kind, tonumber(step) or 0)
             end
         else
-            Printf("ResArena: unknown control action '%s'", tostring(action))
+            Printf("MA3ArenaDeck: unknown control action '%s'", tostring(action))
             return false
         end
     end
 
     if ok then
-        Printf("ResArena: %s (%.2fs)", what, Time() - t0)
+        Printf("MA3ArenaDeck: %s (%.2fs)", what, Time() - t0)
         return true
     end
-    Printf("ResArena: %s FAILED (%s)", tostring(what), tostring(err))
+    Printf("MA3ArenaDeck: %s FAILED (%s)", tostring(what), tostring(err))
     return false
 end
 
@@ -3370,8 +3374,8 @@ local function cycle_poll_interval()
     end
     local value = set_poll_interval(POLL_INTERVAL_OPTIONS[next_index])
     update_control_button_styles()
-    Printf("ResArena: poll interval -> %.2fs", value)
-    ui_echo(string.format("ResArena: poll interval -> %.2fs", value))
+    Printf("MA3ArenaDeck: poll interval -> %.2fs", value)
+    ui_echo(string.format("MA3ArenaDeck: poll interval -> %.2fs", value))
 end
 
 local function run_monitor_loop()
@@ -3387,7 +3391,7 @@ local function run_monitor_loop()
     update_control_button_styles()
 
     Printf(
-        "ResArena: POLL ON - monitor started (v%s)",
+        "MA3ArenaDeck: POLL ON - monitor started (v%s)",
         PLUGIN_VERSION
     )
     Printf(
@@ -3398,7 +3402,7 @@ local function run_monitor_loop()
         composition_url()
     )
     ui_echo(string.format(
-        "ResArena: POLL ON v%s (%.2fs) %s:%d",
+        "MA3ArenaDeck: POLL ON v%s (%.2fs) %s:%d",
         PLUGIN_VERSION,
         interval,
         RESOLUME_HOST,
@@ -3430,13 +3434,13 @@ local function run_monitor_loop()
         last_tick_end = Time()
 
         if not ok then
-            Printf("ResArena monitor ERROR: %s", tostring(err))
-            ui_echo(string.format("ResArena poll ERROR: %s", tostring(err)))
+            Printf("MA3ArenaDeck monitor ERROR: %s", tostring(err))
+            ui_echo(string.format("MA3ArenaDeck poll ERROR: %s", tostring(err)))
         else
             -- Always log the first few ticks so slow fetches are obvious.
             if tick <= 5 or (changed and changed > 0) or (tick % 20 == 0) then
                 Printf(
-                    "ResArena: poll #%d changed=%d total=%.2fs fetch=%.2fs apply=%.2fs gap=%.2fs mode=%s req=%d bytes=%d layers=%d",
+                    "MA3ArenaDeck: poll #%d changed=%d total=%.2fs fetch=%.2fs apply=%.2fs gap=%.2fs mode=%s req=%d bytes=%d layers=%d",
                     tick,
                     changed or 0,
                     tick_s,
@@ -3451,7 +3455,7 @@ local function run_monitor_loop()
             end
             if tick == 1 then
                 ui_echo(string.format(
-                    "ResArena: first poll %.2fs (fetch %.2fs, mode=%s)",
+                    "MA3ArenaDeck: first poll %.2fs (fetch %.2fs, mode=%s)",
                     tick_s,
                     stats and stats.fetch_s or 0,
                     stats and stats.mode or "?"
@@ -3493,10 +3497,10 @@ local function run_monitor_loop()
     if still_owner() then
         set_monitor_flag(false)
         update_control_button_styles()
-        Printf("ResArena: POLL OFF - monitor stopped (after %d ticks)", tick)
-        ui_echo("ResArena: POLL OFF - monitor stopped")
+        Printf("MA3ArenaDeck: POLL OFF - monitor stopped (after %d ticks)", tick)
+        ui_echo("MA3ArenaDeck: POLL OFF - monitor stopped")
     else
-        Printf("ResArena: monitor instance replaced (after %d ticks)", tick)
+        Printf("MA3ArenaDeck: monitor instance replaced (after %d ticks)", tick)
     end
 end
 
@@ -3595,7 +3599,7 @@ function lc.open_fader_dialog(scope, kind)
         overlay:ClearUIChildren()
 
         local base = overlay:Append("BaseInput")
-        base.Name = "ResArenaFader"
+        base.Name = "MA3ArenaDeckFader"
         base.W = 260
         base.H = 620
         base.Columns = 1
@@ -3671,12 +3675,12 @@ function lc.open_fader_dialog(scope, kind)
     end)
 
     if ok then
-        Printf("ResArena: fader popup %s", lc.fader_title(scope, kind))
+        Printf("MA3ArenaDeck: fader popup %s", lc.fader_title(scope, kind))
         return true
     end
 
     -- Fallback: type a value (0-100) when the UI objects are unavailable.
-    Printf("ResArena: fader popup failed (%s), asking for a value", tostring(err))
+    Printf("MA3ArenaDeck: fader popup failed (%s), asking for a value", tostring(err))
     local typed = nil
     pcall(function()
         typed = TextInput(
@@ -3699,11 +3703,11 @@ local function run_full_sync()
     -- Ensure a running monitor yields before we rebuild the layout.
     set_monitor_flag(false)
 
-    Printf("ResArena: SYNC starting (v%s)", PLUGIN_VERSION)
-    Printf("ResArena: fetching composition...")
+    Printf("MA3ArenaDeck: SYNC starting (v%s)", PLUGIN_VERSION)
+    Printf("MA3ArenaDeck: fetching composition...")
     local clips, err, composition, grid = fetch_available_clips()
     if not clips then
-        Printf("ResArena ERROR: %s", tostring(err))
+        Printf("MA3ArenaDeck ERROR: %s", tostring(err))
         Printf("Check that Resolume Webserver is enabled and reachable at %s", composition_url())
         return
     end
@@ -3713,17 +3717,17 @@ local function run_full_sync()
     lc.delete_legacy_appearances()
     local appearance_map = sync_thumbnails(clips)
 
-    Printf("ResArena: building Layout %d '%s'...", LAYOUT_INDEX, LAYOUT_NAME)
+    Printf("MA3ArenaDeck: building Layout %d '%s'...", LAYOUT_INDEX, LAYOUT_NAME)
     local layout, layout_err, created = build_layout(clips, grid, appearance_map)
     if not layout then
-        Printf("ResArena ERROR: %s", tostring(layout_err))
+        Printf("MA3ArenaDeck ERROR: %s", tostring(layout_err))
         return
     end
 
     ensure_control_macros()
 
     Printf(
-        "ResArena: layout ready (%d elements, %d clips, %d layer rows)",
+        "MA3ArenaDeck: layout ready (%d elements, %d clips, %d layer rows)",
         created or 0,
         #clips,
         grid.layer_count
@@ -3744,206 +3748,6 @@ local function run_full_sync()
 end
 
 ------------------------------------------------------------------------
--- Install / Uninstall
-------------------------------------------------------------------------
-
---- Map a MessageBox result to its command value (0 when cancelled).
-function lc.mb_command(ok, result, names)
-    if not ok or type(result) ~= "table" or result.success == false then
-        return 0
-    end
-    local cmd = tonumber(result.result)
-    if cmd == nil and type(result.result) == "string" then
-        cmd = names[result.result:lower()]
-    end
-    return cmd or 0
-end
-
---- First screen when the plugin is tapped in the pool.
---- Returns "install" | "uninstall" | "cancel".
-function lc.show_start_dialog(display_handle)
-    local options = {
-        title = "ResArena Control for MA3",
-        message = "Install: set up Resolume connection and build the layout.\n"
-            .. "Uninstall: remove the layout, macros, appearances and images\n"
-            .. "this plugin created, and its saved settings.",
-        commands = {
-            { value = 1, name = "Install" },
-            { value = 2, name = "Uninstall" },
-            { value = 0, name = "Cancel" },
-        },
-    }
-    if display_handle ~= nil then
-        options.display = display_handle
-    end
-    local ok, result = pcall(MessageBox, options)
-    local cmd = lc.mb_command(ok, result, { install = 1, uninstall = 2 })
-    if cmd == 1 then
-        return "install"
-    elseif cmd == 2 then
-        return "uninstall"
-    end
-    Printf("ResArena: cancelled")
-    return "cancel"
-end
-
-function lc.confirm_uninstall(display_handle)
-    local options = {
-        title = "ResArena Control for MA3 - Uninstall",
-        message = string.format(
-            "Delete Layout %d '%s', all Res_ (and old MAD_) macros, appearances and images\n"
-                .. "(from slot %d / %d / %d) and the plugin settings?",
-            LAYOUT_INDEX,
-            LAYOUT_NAME,
-            MACRO_START_INDEX,
-            APPEARANCE_START_INDEX,
-            IMAGE_START_INDEX
-        ),
-        commands = {
-            { value = 1, name = "Uninstall" },
-            { value = 0, name = "Cancel" },
-        },
-    }
-    if display_handle ~= nil then
-        options.display = display_handle
-    end
-    local ok, result = pcall(MessageBox, options)
-    return lc.mb_command(ok, result, { uninstall = 1 }) == 1
-end
-
--- Current prefixes plus MAD_ / MADP_ from MA3ArenaDeck before the rename.
-lc.OWN_PREFIXES = { IMAGE_NAME_PREFIX, APPEARANCE_PLAY_PREFIX, "MAD_", "MADP_" }
-
-function lc.has_plugin_prefix(obj, prefixes)
-    local name = object_name(obj)
-    if type(name) ~= "string" then
-        return false
-    end
-    for _, prefix in ipairs(prefixes or lc.OWN_PREFIXES) do
-        if name:sub(1, #prefix) == prefix then
-            return true
-        end
-    end
-    return false
-end
-
---- Delete pool objects named Res_* / ResP_* (or old MAD_* / MADP_*) in [start, start + count).
---- on_delete(index, obj) runs before each delete. Returns how many went.
-function lc.delete_prefixed(pool, delete_cmd, start, count, on_delete, prefixes)
-    if pool == nil then
-        return 0
-    end
-    local removed = 0
-    for i = start + count - 1, start, -1 do
-        local obj = pool[i]
-        if pool_object_valid(obj) and lc.has_plugin_prefix(obj, prefixes) then
-            if on_delete then
-                on_delete(i, obj)
-            end
-            pcall(function()
-                pool:Delete(i)
-            end)
-            if pool_object_valid(pool[i]) then
-                pcall(function()
-                    Cmd(string.format(delete_cmd, i))
-                end)
-            end
-            removed = removed + 1
-        end
-    end
-    return removed
-end
-
-function lc.uninstall()
-    set_monitor_flag(false)
-    Printf("ResArena: uninstalling (v%s)...", PLUGIN_VERSION)
-
-    -- Layout: only when it is still ours (name matches).
-    local layouts = get_layouts_pool()
-    local layout = layouts and layouts[LAYOUT_INDEX]
-    local layout_removed = false
-    if pool_object_valid(layout) and object_name(layout) == LAYOUT_NAME then
-        pcall(function()
-            layouts:Delete(LAYOUT_INDEX)
-        end)
-        if pool_object_valid(layouts[LAYOUT_INDEX]) then
-            pcall(function()
-                Cmd(string.format("Delete Layout %d /NoConfirmation", LAYOUT_INDEX))
-            end)
-        end
-        layout_removed = true
-    elseif pool_object_valid(layout) then
-        Printf(
-            "ResArena: Layout %d is named '%s', not '%s'; left in place",
-            LAYOUT_INDEX,
-            tostring(object_name(layout)),
-            LAYOUT_NAME
-        )
-    end
-
-    -- Macros: control (SYNC/POLL...), per-clip fire and layer controls.
-    local macros = DataPool().Macros
-    local macro_count = lc.delete_prefixed(macros, "Delete Macro %d /NoConfirmation", MACRO_START_INDEX, 20 + MAX_MEDIA_SLOTS * 2)
-
-    local app_count = lc.delete_prefixed(
-        get_appearances_pool(),
-        "Delete Appearance %d /NoConfirmation",
-        APPEARANCE_START_INDEX,
-        MAX_MEDIA_SLOTS * 2
-    )
-
-    -- Images + the thumbnail files written to the user image library.
-    local lib = images_library_path()
-    local file_count = 0
-    local image_count = lc.delete_prefixed(
-        get_images_pool(),
-        "Delete Image " .. IMAGE_POOL .. ".%d /NoConfirmation",
-        IMAGE_START_INDEX,
-        MAX_MEDIA_SLOTS,
-        function(_, obj)
-            local base = object_name(obj)
-            if lib and lib ~= "" and base then
-                for _, f in ipairs({ base .. ".png", base .. ".png.xml" }) do
-                    if os.remove(path_join(lib, f)) then
-                        file_count = file_count + 1
-                    end
-                end
-            end
-        end
-    )
-
-    -- Saved settings and runtime state (GlobalVars ResArena_* and old MA3ArenaDeck_*).
-    local keys = {
-        "Host", "Port", "LayoutIndex", "LayoutName", "ImageStart", "AppearanceStart",
-        "MacroStart", "OnlyWithThumbnail", "FetchThumbnails", "HighlightPreviewing",
-        "PollInterval", "Monitor", "MonitorOwner", "Trigger", "Fire", "Action",
-    }
-    for scope = 0, 64 do
-        keys[#keys + 1] = string.format("VolR_%d", scope)
-        for _, kind in ipairs({ "master", "audio", "video", "bypass" }) do
-            keys[#keys + 1] = string.format("Lvl_%d_%s", scope, kind)
-        end
-    end
-    local vars = GlobalVars()
-    for _, key in ipairs(keys) do
-        for _, prefix in ipairs({ CFG_PREFIX, "MA3ArenaDeck_" }) do
-            pcall(function()
-                DelVar(vars, prefix .. key)
-            end)
-        end
-    end
-
-    Printf(
-        "ResArena: uninstalled (layout %s, %d macros, %d appearances, %d images, %d files, settings cleared)",
-        layout_removed and "removed" or "kept",
-        macro_count,
-        app_count,
-        image_count,
-        file_count
-    )
-end
-
-------------------------------------------------------------------------
 -- Entry point
 ------------------------------------------------------------------------
 
@@ -3958,7 +3762,7 @@ function Main(display_handle, argument)
     end
 
     Printf(
-        "ResArena: v%s starting (%s) arg='%s' (type=%s)",
+        "MA3ArenaDeck: v%s starting (%s) arg='%s' (type=%s)",
         PLUGIN_VERSION,
         tostring(pluginName or "plugin"),
         arg,
@@ -4002,7 +3806,7 @@ function Main(display_handle, argument)
     if arg == "stop" or arg == "polloff" or arg == "poll off" or arg == "off" then
         set_monitor_flag(false)
         update_control_button_styles()
-        Printf("ResArena: stop requested")
+        Printf("MA3ArenaDeck: stop requested")
         return
     end
 
@@ -4028,17 +3832,7 @@ function Main(display_handle, argument)
         return
     end
 
-    -- Plugin pool / unknown: Install / Uninstall / Cancel first.
-    local choice = lc.show_start_dialog(display_handle)
-    if choice == "uninstall" then
-        if lc.confirm_uninstall(display_handle) then
-            lc.uninstall()
-        end
-        return
-    end
-    if choice ~= "install" then
-        return
-    end
+    -- Plugin pool / unknown / setup: always show configuration UI first.
     local action = show_setup_dialog(display_handle)
     if action ~= "sync" then
         return
