@@ -25,7 +25,7 @@ local signalTable = select(3, ...)
 local myHandle = select(4, ...)
 
 -- Bump when changing runtime behavior so System Monitor proves the reload.
-local PLUGIN_VERSION = "2026-10-04l"
+local PLUGIN_VERSION = "2026-10-04m"
 
 ------------------------------------------------------------------------
 -- Configuration (defaults; overridden by GlobalVars / setup dialog)
@@ -3711,7 +3711,6 @@ local function run_full_sync()
     print_clips(clips, composition, grid)
 
     lc.delete_legacy_appearances()
-    lc.delete_old_named_objects()
     local appearance_map = sync_thumbnails(clips)
 
     Printf("ResArena: building Layout %d '%s'...", LAYOUT_INDEX, LAYOUT_NAME)
@@ -3814,7 +3813,6 @@ end
 
 -- Current prefixes plus MAD_ / MADP_ from MA3ArenaDeck before the rename.
 lc.OWN_PREFIXES = { IMAGE_NAME_PREFIX, APPEARANCE_PLAY_PREFIX, "MAD_", "MADP_" }
-lc.OLD_PREFIXES = { "MAD_", "MADP_" }
 
 function lc.has_plugin_prefix(obj, prefixes)
     local name = object_name(obj)
@@ -3854,27 +3852,6 @@ function lc.delete_prefixed(pool, delete_cmd, start, count, on_delete, prefixes)
         end
     end
     return removed
-end
-
---- Remove MAD_* / MADP_* appearances and images left by MA3ArenaDeck
---- before the rename, so the Res_* ones get their pool slots. Macros keep
---- their slots and are renamed when SYNC rebuilds them.
-function lc.delete_old_named_objects()
-    local old = lc.OLD_PREFIXES
-    local lib = images_library_path()
-    local n = lc.delete_prefixed(get_appearances_pool(), "Delete Appearance %d /NoConfirmation",
-        APPEARANCE_START_INDEX, MAX_MEDIA_SLOTS * 2, nil, old)
-    n = n + lc.delete_prefixed(get_images_pool(), "Delete Image " .. IMAGE_POOL .. ".%d /NoConfirmation",
-        IMAGE_START_INDEX, MAX_MEDIA_SLOTS, function(_, obj)
-            local base = object_name(obj)
-            if lib and lib ~= "" and base then
-                os.remove(path_join(lib, base .. ".png"))
-                os.remove(path_join(lib, base .. ".png.xml"))
-            end
-        end, old)
-    if n > 0 then
-        Printf("ResArena: removed %d old MAD_ objects", n)
-    end
 end
 
 function lc.uninstall()
