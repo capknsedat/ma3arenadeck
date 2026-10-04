@@ -177,6 +177,8 @@ Plugin "MA3ArenaDeck" "monitor"
 | Plugin changes not loading | `Installed = Yes`, external `.lua`, then `ReloadAllPlugins` |
 | Layout buttons missing / wrong | Run **SYNC** once after install or after changing macro start index |
 | Tap does nothing | **TRIG ON**; then **SYNC** once so clip fire macros are rebuilt |
+| Tap is slow | System Monitor shows `triggered Lx Cy (tap waited …s, POST …s)` and `poll #n … fetch=…s`; a large *tap waited* means the poll was blocked, a large *POST* means Resolume itself answered slowly |
+| Frame colours do not change | System Monitor prints `border colour via …` or `border colour not confirmed …` after SYNC; clip appearances also get a black / red background as a fallback |
 
 ---
 

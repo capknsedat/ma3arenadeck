@@ -25,7 +25,7 @@ local signalTable = select(3, ...)
 local myHandle = select(4, ...)
 
 -- Bump when changing runtime behavior so System Monitor proves the reload.
-local PLUGIN_VERSION = "2026-10-03a"
+local PLUGIN_VERSION = "2026-10-04a"
 
 ------------------------------------------------------------------------
 -- Configuration (defaults; overridden by GlobalVars / setup dialog)
@@ -708,48 +708,22 @@ local function collect_connected_states(composition)
     return states
 end
 
---- Lighter poll: fetch each layer instead of the full composition JSON.
---- (Still heavy: Resolume returns full clip trees per layer ~hundreds of KB.)
-local function collect_connected_states_by_layers(layer_indexes, timeout_sec)
-    local states = {}
-    local bytes = 0
-    local requests = 0
-    for layer_index in pairs(layer_indexes) do
-        requests = requests + 1
-        local raw, err = http_get(layer_url(layer_index), "application/json", timeout_sec or 2)
-        if not raw then
-            return nil, err, bytes, requests
-        end
-        bytes = bytes + #raw
-        local ok, layer = pcall(json.decode, raw)
-        if not ok or type(layer) ~= "table" then
-            return nil, "Failed to decode layer JSON " .. tostring(layer_index), bytes, requests
-        end
-        for _, clip in ipairs(layer.clips or {}) do
-            if clip.id ~= nil then
-                states[tostring(clip.id)] = param_value(clip.connected, "Disconnected")
-            end
-        end
-    end
-    return states, nil, bytes, requests
-end
-
 local function fetch_clip_connected_state(meta, timeout_sec)
+    -- Connection: close on purpose. LuaSocket never reuses the socket, and a
+    -- keep-alive reply without a usable length is read until the timeout.
     local raw, err
     if meta.layer and meta.layer > 0 and meta.column and meta.column > 0 then
         raw, err = http_get(
             clip_slot_url(meta.layer, meta.column),
             "application/json",
-            timeout_sec or 1.5,
-            true
+            timeout_sec or 1.0
         )
     end
     if not raw then
         raw, err = http_get(
             clip_by_id_url(meta.id),
             "application/json",
-            timeout_sec or 1.5,
-            true
+            timeout_sec or 1.0
         )
     end
     if not raw then
@@ -786,7 +760,11 @@ local function collect_connected_states_by_clips(clip_metas, timeout_sec, should
     local states = {}
     local bytes = 0
     local requests = 0
+    local failures = 0
+    local last_err = nil
 
+    -- One bad slot must not fail the whole poll (that used to drop into the
+    -- multi-second layer/composition fallbacks). Keep its last known state.
     local function check_meta(meta)
         if should_abort and should_abort() then
             return nil, POLL_ABORTED
@@ -795,7 +773,9 @@ local function collect_connected_states_by_clips(clip_metas, timeout_sec, should
         local state, err, n = fetch_clip_connected_state(meta, timeout_sec)
         bytes = bytes + (n or 0)
         if not state then
-            return nil, err
+            failures = failures + 1
+            last_err = err
+            state = meta.playing and "Connected" or "Disconnected"
         end
         states[tostring(meta.id)] = state
         return state, nil
@@ -830,6 +810,10 @@ local function collect_connected_states_by_clips(clip_metas, timeout_sec, should
         if not state then
             return nil, err, bytes, requests
         end
+    end
+
+    if requests > 0 and failures == requests then
+        return nil, last_err, bytes, requests
     end
 
     return states, nil, bytes, requests
@@ -1181,15 +1165,47 @@ local function import_image_to_pool(clip, png_data)
     }
 end
 
+--- Background colour of a clip appearance (shows around / behind the thumbnail).
+local function set_appearance_back(appearance, r, g, b)
+    local color01 = string.format("%.3f,%.3f,%.3f,1", r / 255, g / 255, b / 255)
+    local props = {
+        { "Color", color01 },
+        { "BackR", tostring(r) },
+        { "BackG", tostring(g) },
+        { "BackB", tostring(b) },
+        { "BackAlpha", "255" },
+        { "BACKR", tostring(r) },
+        { "BACKG", tostring(g) },
+        { "BACKB", tostring(b) },
+    }
+    for _, p in ipairs(props) do
+        pcall(function()
+            appearance:Set(p[1], p[2])
+        end)
+    end
+end
+
 local function style_playing_appearance(appearance)
-    -- Subtle red marker tint for playing clips. MA3 Obj.Set wants strings.
+    -- Red background + subtle red tint for playing clips. MA3 Obj.Set wants strings.
+    set_appearance_back(appearance, PLAYING_BORDER_R, PLAYING_BORDER_G, PLAYING_BORDER_B)
     local props = {
         { "ImageR", "255" },
         { "ImageG", "215" },
         { "ImageB", "215" },
-        { "BACKR", "60" },
-        { "BACKG", "0" },
-        { "BACKB", "0" },
+    }
+    for _, p in ipairs(props) do
+        pcall(function()
+            appearance:Set(p[1], p[2])
+        end)
+    end
+end
+
+local function style_idle_appearance(appearance)
+    set_appearance_back(appearance, IDLE_BORDER_R, IDLE_BORDER_G, IDLE_BORDER_B)
+    local props = {
+        { "ImageR", "255" },
+        { "ImageG", "255" },
+        { "ImageB", "255" },
     }
     for _, p in ipairs(props) do
         pcall(function()
@@ -1199,65 +1215,148 @@ local function style_playing_appearance(appearance)
 end
 
 -- Remember which border-color write works on this console (avoid Cmd spam).
-local border_color_method = nil -- "obj-BorderColor" | "cmd-BorderColor" | ...
+-- nil = not probed yet, false = nothing worked, else index into BORDER_COLOR_WAYS.
+local border_color_way = nil
+local border_color_logged = false
 
---- Apply border color on a layout element.
-local function set_element_border_color(element, r, g, b)
-    if element == nil then
-        return
-    end
+local function color_formats(r, g, b)
+    return {
+        -- grandMA3 colour properties are 0..1 floats (same as Appearance "Color").
+        float = string.format("%.3f,%.3f,%.3f,1", r / 255, g / 255, b / 255),
+        int = string.format("%d,%d,%d,255", r, g, b),
+        hex = string.format("%02X%02X%02XFF", r, g, b),
+    }
+end
 
-    local idx = nil
+local BORDER_COLOR_WAYS = {
+    { prop = "BorderColor", fmt = "float" },
+    { prop = "BorderColor", fmt = "hex" },
+    { prop = "BorderColor", fmt = "int" },
+    { prop = "BORDERCOLOR", fmt = "float" },
+    { prop = "BorderColor", fmt = "float", cmd = true },
+    { prop = "BorderColor", fmt = "int", cmd = true },
+}
+
+local function read_element_prop(element, prop)
+    local value = nil
     pcall(function()
-        idx = element:Index()
+        value = element:Get(prop)
     end)
-    if not idx then
-        return
-    end
-
-    local color = string.format("%d,%d,%d,255", r, g, b)
-
-    local function try_obj(prop)
-        return pcall(function()
-            element:Set(prop, color)
+    if value == nil then
+        pcall(function()
+            value = element[prop]
         end)
     end
+    if value == nil then
+        return nil
+    end
+    return tostring(value)
+end
 
-    local function try_cmd(prop)
+--- True when a read-back colour string matches the wanted 0-255 RGB.
+local function color_matches(readback, r, g, b)
+    if type(readback) ~= "string" or readback == "" then
+        return false
+    end
+    local want = { r / 255, g / 255, b / 255 }
+    local hex = readback:match("^#?(%x%x%x%x%x%x)")
+    if hex and not readback:find(",") then
+        local got = {
+            tonumber(hex:sub(1, 2), 16) / 255,
+            tonumber(hex:sub(3, 4), 16) / 255,
+            tonumber(hex:sub(5, 6), 16) / 255,
+        }
+        for i = 1, 3 do
+            if math.abs(got[i] - want[i]) > 0.02 then
+                return false
+            end
+        end
+        return true
+    end
+    local nums = {}
+    for n in readback:gmatch("[%d%.]+") do
+        nums[#nums + 1] = tonumber(n)
+    end
+    if #nums < 3 then
+        return false
+    end
+    local scale = (nums[1] > 1 or nums[2] > 1 or nums[3] > 1) and 255 or 1
+    for i = 1, 3 do
+        if math.abs((nums[i] or 0) / scale - want[i]) > 0.02 then
+            return false
+        end
+    end
+    return true
+end
+
+local function write_border_color(element, way, r, g, b)
+    local value = color_formats(r, g, b)[way.fmt]
+    if way.cmd then
+        local idx = nil
+        pcall(function()
+            idx = element:Index()
+        end)
+        if not idx then
+            return false
+        end
         return pcall(function()
             Cmd(string.format(
                 'Set Layout %d.%d Property "%s" "%s"',
                 LAYOUT_INDEX,
                 idx,
-                prop,
-                color
+                way.prop,
+                value
             ))
         end)
     end
+    return pcall(function()
+        element:Set(way.prop, value)
+    end)
+end
 
-    if border_color_method == "obj-BorderColor" then
-        try_obj("BorderColor")
-        return
-    elseif border_color_method == "obj-BORDERCOLOR" then
-        try_obj("BORDERCOLOR")
-        return
-    elseif border_color_method == "cmd-BorderColor" then
-        try_cmd("BorderColor")
-        return
-    elseif border_color_method == "cmd-BORDERCOLOR" then
-        try_cmd("BORDERCOLOR")
+--- Apply border color on a layout element.
+--- The first call probes which property/format the console accepts by
+--- reading the value back, and logs the result once to System Monitor.
+local function set_element_border_color(element, r, g, b)
+    if element == nil then
         return
     end
 
-    if try_obj("BorderColor") then
-        border_color_method = "obj-BorderColor"
-    elseif try_obj("BORDERCOLOR") then
-        border_color_method = "obj-BORDERCOLOR"
-    elseif try_cmd("BorderColor") then
-        border_color_method = "cmd-BorderColor"
-    elseif try_cmd("BORDERCOLOR") then
-        border_color_method = "cmd-BORDERCOLOR"
+    if border_color_way then
+        write_border_color(element, BORDER_COLOR_WAYS[border_color_way], r, g, b)
+        return
     end
+    if border_color_way == false then
+        return
+    end
+
+    local before = read_element_prop(element, "BorderColor")
+    for i, way in ipairs(BORDER_COLOR_WAYS) do
+        if write_border_color(element, way, r, g, b)
+            and color_matches(read_element_prop(element, way.prop), r, g, b)
+        then
+            border_color_way = i
+            Printf(
+                "MA3ArenaDeck: border colour via %s (%s) -> '%s'",
+                way.prop,
+                way.fmt,
+                tostring(read_element_prop(element, way.prop))
+            )
+            return
+        end
+    end
+
+    -- Nothing verified: keep the float write (most likely format) but say so.
+    write_border_color(element, BORDER_COLOR_WAYS[1], r, g, b)
+    if not border_color_logged then
+        border_color_logged = true
+        Printf(
+            "MA3ArenaDeck: border colour not confirmed (BorderColor was '%s', now '%s'); using appearance colours",
+            tostring(before),
+            tostring(read_element_prop(element, "BorderColor"))
+        )
+    end
+    border_color_way = 1
 end
 
 local function apply_playing_chrome(element, playing)
@@ -1309,6 +1408,8 @@ local function ensure_named_appearance(app_name, image_info, playing)
     end
     if playing then
         style_playing_appearance(appearance)
+    else
+        style_idle_appearance(appearance)
     end
 
     return {
@@ -1670,8 +1771,9 @@ local function ensure_clip_trigger_macros(clips)
             local name = string.format("MAD_Fire_L%dC%d", layer, column)
             macro:Set("Name", name)
             write_macro_lines(macro, macro_index, {
+                -- Third field = tap time, so the log shows how long the tap waited.
                 string.format(
-                    'Lua "SetVar(GlobalVars(), \'%s\', \'%d,%d\')"',
+                    'Lua "SetVar(GlobalVars(), \'%s\', \'%d,%d,\' .. (Time and Time() or \'\'))"',
                     FIRE_VAR,
                     layer,
                     column
@@ -2345,17 +2447,21 @@ local function process_pending_fire()
         SetVar(GlobalVars(), FIRE_VAR, "")
     end)
 
-    local layer, column = tostring(v):match("^(%d+)%s*,%s*(%d+)$")
+    local layer, column, tapped_at = tostring(v):match("^(%d+)%s*,%s*(%d+)%s*,?%s*([%d%.]*)$")
     if not layer then
         return nil
     end
 
+    local t_post = Time()
     local ok, err = http_post(clip_connect_url(layer, column), "", 2)
     if ok then
+        local waited = tonumber(tapped_at) and (t_post - tonumber(tapped_at)) or -1
         Printf(
-            "MA3ArenaDeck: triggered L%d C%d (from layout tap)",
+            "MA3ArenaDeck: triggered L%d C%d (tap waited %.2fs, POST %.2fs)",
             tonumber(layer) or 0,
-            tonumber(column) or 0
+            tonumber(column) or 0,
+            waited,
+            Time() - t_post
         )
         return tonumber(layer), tonumber(column)
     end
@@ -2637,7 +2743,7 @@ local function update_playing_highlights()
     if #clip_metas > 0 then
         -- Prefer tiny per-clip requests (layer JSON was ~350KB each / ~3s).
         states, err, bytes, requests =
-            collect_connected_states_by_clips(clip_metas, 1.5, handle_pending_fire)
+            collect_connected_states_by_clips(clip_metas, 1.0, handle_pending_fire)
         if err == POLL_ABORTED then
             -- A tap fired mid-scan; these results are stale, re-poll right away.
             return true, nil, 0, {
@@ -2651,24 +2757,15 @@ local function update_playing_highlights()
                 aborted = true,
             }
         end
-        if not states and layer_count > 0 then
-            mode = "layers-fallback"
-            states, err, bytes, requests = collect_connected_states_by_layers(layer_indexes, 2)
-        end
+        -- No layer/composition fallback here: those responses are hundreds
+        -- of KB and took several seconds each, blocking layout taps meanwhile.
         if not states then
-            mode = "composition-fallback"
-            local composition, comp_err, comp_bytes = fetch_composition(5)
-            if not composition then
-                return false, tostring(err or comp_err), 0, {
-                    mode = mode,
-                    fetch_s = Time() - t_fetch0,
-                    bytes = 0,
-                    requests = requests or 0,
-                }
-            end
-            states = collect_connected_states(composition)
-            bytes = comp_bytes or 0
-            requests = 1
+            return false, tostring(err), 0, {
+                mode = mode,
+                fetch_s = Time() - t_fetch0,
+                bytes = bytes or 0,
+                requests = requests or 0,
+            }
         end
     else
         mode = "composition"
