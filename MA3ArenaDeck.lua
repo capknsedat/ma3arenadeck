@@ -25,7 +25,7 @@ local signalTable = select(3, ...)
 local myHandle = select(4, ...)
 
 -- Bump when changing runtime behavior so System Monitor proves the reload.
-local PLUGIN_VERSION = "2026-10-04n"
+local PLUGIN_VERSION = "2026-10-04o"
 
 ------------------------------------------------------------------------
 -- Configuration (defaults; overridden by GlobalVars / setup dialog)
@@ -238,6 +238,7 @@ local function load_config()
     RESOLUME_HOST = tostring(cfg_get("Host", RESOLUME_HOST))
     RESOLUME_PORT = tonumber(cfg_get("Port", RESOLUME_PORT)) or RESOLUME_PORT
     LAYOUT_INDEX = tonumber(cfg_get("LayoutIndex", LAYOUT_INDEX)) or LAYOUT_INDEX
+    lc.layout_pref = LAYOUT_INDEX
     LAYOUT_NAME = tostring(cfg_get("LayoutName", LAYOUT_NAME))
     IMAGE_START_INDEX = tonumber(cfg_get("ImageStart", IMAGE_START_INDEX)) or IMAGE_START_INDEX
     APPEARANCE_START_INDEX = tonumber(cfg_get("AppearanceStart", APPEARANCE_START_INDEX))
@@ -418,6 +419,7 @@ local function show_setup_dialog(display_handle)
     RESOLUME_HOST = tostring(mb_input(result, "01 Host", RESOLUME_HOST))
     RESOLUME_PORT = tonumber(mb_input(result, "02 Port", RESOLUME_PORT)) or RESOLUME_PORT
     LAYOUT_INDEX = tonumber(mb_input(result, "03 Layout Index", LAYOUT_INDEX)) or LAYOUT_INDEX
+    lc.layout_pref = LAYOUT_INDEX
     LAYOUT_NAME = tostring(mb_input(result, "04 Layout Name", LAYOUT_NAME))
     IMAGE_START_INDEX = tonumber(mb_input(result, "05 Image Start", IMAGE_START_INDEX))
         or IMAGE_START_INDEX
@@ -1085,7 +1087,7 @@ local function ensure_macro(index)
         return macro
     end
     pcall(function()
-        Cmd(string.format("Store Macro %d /Overwrite", index))
+        Cmd(string.format("Store Macro %d", index))
     end)
     if pool_object_valid(macros[index]) then
         return macros[index]
@@ -1122,6 +1124,107 @@ local function ensure_pool_index(pool, name, start_index, max_slots)
         return nil, "No free pool slots left in configured range"
     end
     return free
+end
+
+--- Never overwrite: a slot is used only if it is empty or already holds
+--- an object with our exact name. Search range for macros / layouts.
+lc.MAX_MACRO_SLOTS = 2000
+lc.MAX_LAYOUT_SLOTS = 9999
+
+function lc.pool_get(pool, index)
+    local ok, obj = pcall(function()
+        return pool[index]
+    end)
+    if ok and pool_object_valid(obj) then
+        return obj
+    end
+    return nil
+end
+
+--- Scan the macro range once; returns alloc(name) -> index of the macro
+--- already named `name`, or of a free slot. Occupied slots are never handed out.
+function lc.macro_allocator()
+    local macros = DataPool().Macros
+    local by_name, free, next_free = {}, {}, 1
+    if macros ~= nil then
+        for i = MACRO_START_INDEX, MACRO_START_INDEX + lc.MAX_MACRO_SLOTS - 1 do
+            local obj = lc.pool_get(macros, i)
+            if obj then
+                local n = object_name(obj)
+                if n ~= nil and by_name[n] == nil then
+                    by_name[n] = i
+                end
+            else
+                free[#free + 1] = i
+            end
+        end
+    end
+    return function(name)
+        if macros == nil then
+            return nil
+        end
+        local idx = by_name[name]
+        if idx and object_name(lc.pool_get(macros, idx)) == name then
+            return idx
+        end
+        while next_free <= #free do
+            local i = free[next_free]
+            next_free = next_free + 1
+            if lc.pool_get(macros, i) == nil then
+                by_name[name] = i
+                return i
+            end
+        end
+        return nil
+    end
+end
+
+--- Find our layout by name (preferring the saved index); with `create`,
+--- pick the first empty slot from the saved index upward. Sets LAYOUT_INDEX.
+function lc.resolve_layout_index(create)
+    local layouts = DataPool().Layouts
+    if layouts == nil then
+        return nil
+    end
+    local function ours(i)
+        return object_name(lc.pool_get(layouts, i)) == LAYOUT_NAME
+    end
+    local pref = lc.layout_pref or LAYOUT_INDEX
+    local found = nil
+    if ours(pref) then
+        found = pref
+    else
+        local count = lc.MAX_LAYOUT_SLOTS
+        pcall(function()
+            count = math.min(count, layouts:Count())
+        end)
+        for i = 1, count do
+            if ours(i) then
+                found = i
+                break
+            end
+        end
+    end
+    if found == nil and create then
+        for i = math.max(1, pref), lc.MAX_LAYOUT_SLOTS do
+            if lc.pool_get(layouts, i) == nil then
+                found = i
+                break
+            end
+        end
+    end
+    if found == nil then
+        -- Not built yet: point at no layout so nothing touches a user layout.
+        LAYOUT_INDEX = -1
+        return nil
+    end
+    if found ~= pref then
+        Printf("MA3ArenaDeck: using Layout %d (Layout %d is not ours)", found, pref)
+        cfg_set("LayoutIndex", tostring(found))
+    end
+    lc.layout_pref = found
+    LAYOUT_INDEX = found
+    return found
 end
 
 --- Write PNG + .png.xml library descriptor (FileName pointer).
@@ -1192,7 +1295,7 @@ local function try_import_image(images, image_index, files)
     local image_obj = ensure_pool_object(images, image_index)
     if image_obj == nil then
         pcall(function()
-            Cmd(string.format("Store Image %d.%d /Overwrite", IMAGE_POOL, image_index))
+            Cmd(string.format("Store Image %d.%d", IMAGE_POOL, image_index))
         end)
         image_obj = images[image_index]
     end
@@ -1766,7 +1869,6 @@ local function ensure_control_macros()
 
     local defs = {
         {
-            index = MACRO_START_INDEX,
             name = "MAD_Sync",
             note = "resolume-ctrl:sync",
             lines = {
@@ -1776,7 +1878,6 @@ local function ensure_control_macros()
             },
         },
         {
-            index = MACRO_START_INDEX + 1,
             name = "MAD_PollOn",
             note = "resolume-ctrl:monitor",
             lines = {
@@ -1784,7 +1885,6 @@ local function ensure_control_macros()
             },
         },
         {
-            index = MACRO_START_INDEX + 2,
             name = "MAD_PollOff",
             note = "resolume-ctrl:stop",
             -- Clear flag immediately (interrupts loop), then plugin stop for UI chrome.
@@ -1794,7 +1894,6 @@ local function ensure_control_macros()
             },
         },
         {
-            index = MACRO_START_INDEX + 3,
             name = "MAD_Interval",
             note = "resolume-ctrl:interval",
             lines = {
@@ -1802,7 +1901,6 @@ local function ensure_control_macros()
             },
         },
         {
-            index = MACRO_START_INDEX + 4,
             name = "MAD_TrigToggle",
             note = "resolume-ctrl:trigger",
             lines = {
@@ -1811,11 +1909,13 @@ local function ensure_control_macros()
         },
     }
 
+    local alloc = lc.macro_allocator()
     for _, def in ipairs(defs) do
-        local macro = ensure_macro(def.index)
+        def.index = alloc(def.name)
+        local macro = def.index and ensure_macro(def.index)
         if macro == nil then
-            Printf("MA3ArenaDeck: could not create Macro %d '%s'", def.index, def.name)
-            return nil, string.format("Could not create Macro %d", def.index)
+            Printf("MA3ArenaDeck: could not create Macro '%s' (no free slot)", def.name)
+            return nil, string.format("Could not create Macro '%s'", def.name)
         end
         macro:Set("Name", def.name)
         write_macro_lines(macro, def.index, def.lines)
@@ -1845,25 +1945,19 @@ local function ensure_clip_trigger_macros(clips)
         return map
     end
 
-    -- Grow once for the full clip range (fresh shows need Resize before Create).
-    if #clips > 0 then
-        ensure_macro(TRIGGER_MACRO_START + #clips - 1)
-    end
-
-    for i, clip in ipairs(clips) do
-        local macro_index = TRIGGER_MACRO_START + (i - 1)
-        local macro = ensure_macro(macro_index)
+    local alloc = lc.macro_allocator()
+    for _, clip in ipairs(clips) do
+        local layer = tonumber(clip.layer) or 1
+        local column = tonumber(clip.column) or 1
+        local name = string.format("MAD_Fire_L%dC%d", layer, column)
+        local macro_index = alloc(name)
+        local macro = macro_index and ensure_macro(macro_index)
         if macro == nil then
             Printf(
-                "MA3ArenaDeck: could not create trigger Macro %d (clip L%d C%d)",
-                macro_index,
-                tonumber(clip.layer) or 1,
-                tonumber(clip.column) or 1
+                "MA3ArenaDeck: could not create trigger Macro '%s' (no free slot)",
+                name
             )
         else
-            local layer = tonumber(clip.layer) or 1
-            local column = tonumber(clip.column) or 1
-            local name = string.format("MAD_Fire_L%dC%d", layer, column)
             macro:Set("Name", name)
             write_macro_lines(macro, macro_index, {
                 -- Third field = tap time, so the log shows how long the tap waited.
@@ -1879,9 +1973,9 @@ local function ensure_clip_trigger_macros(clips)
     end
 
     Printf(
-        "MA3ArenaDeck: clip trigger macros ready (%d, start=%d)",
+        "MA3ArenaDeck: clip trigger macros ready (%d, search from %d)",
         #clips,
-        TRIGGER_MACRO_START
+        MACRO_START_INDEX
     )
     return map
 end
@@ -1944,12 +2038,11 @@ function lc.action_macro_line(action)
     )
 end
 
---- Macros for layer / composition controls, placed after the clip macros.
+--- Macros for layer / composition controls (own-named or free slots).
 --- Returns a list of { macro_index, action, ... } definitions in build order.
-function lc.ensure_layer_control_macros(grid, first_index)
+function lc.ensure_layer_control_macros(grid)
     local defs = {}
     local function add(def)
-        def.macro_index = first_index + #defs
         defs[#defs + 1] = def
     end
     local function fader(scope, kind, name)
@@ -1978,13 +2071,12 @@ function lc.ensure_layer_control_macros(grid, first_index)
         end
     end
 
-    if #defs > 0 then
-        ensure_macro(defs[#defs].macro_index)
-    end
+    local alloc = lc.macro_allocator()
     for _, def in ipairs(defs) do
-        local macro = ensure_macro(def.macro_index)
+        def.macro_index = alloc(def.name)
+        local macro = def.macro_index and ensure_macro(def.macro_index)
         if macro == nil then
-            Printf("MA3ArenaDeck: could not create control Macro %d", def.macro_index)
+            Printf("MA3ArenaDeck: could not create control Macro '%s' (no free slot)", def.name)
             def.macro_index = nil
         else
             macro:Set("Name", def.name)
@@ -1992,9 +2084,8 @@ function lc.ensure_layer_control_macros(grid, first_index)
         end
     end
     Printf(
-        "MA3ArenaDeck: layer control macros ready (%d, start=%d)",
-        #defs,
-        first_index
+        "MA3ArenaDeck: layer control macros ready (%d)",
+        #defs
     )
     return defs
 end
@@ -2051,12 +2142,16 @@ local function ensure_layout()
         return nil, "Layouts pool not found"
     end
 
-    if layouts[LAYOUT_INDEX] == nil then
+    -- Our layout (by name) or an empty slot; never a user's layout.
+    if lc.resolve_layout_index(true) == nil then
+        return nil, "No free Layout slot"
+    end
+    if lc.pool_get(layouts, LAYOUT_INDEX) == nil then
         ensure_pool_object(layouts, LAYOUT_INDEX)
     end
 
-    local layout = layouts[LAYOUT_INDEX]
-    if layout == nil or not pool_object_valid(layout) then
+    local layout = lc.pool_get(layouts, LAYOUT_INDEX)
+    if layout == nil then
         return nil, string.format("Could not create Layout %d", LAYOUT_INDEX)
     end
 
@@ -2391,7 +2486,7 @@ local function apply_control_chrome(element, kind, active)
 end
 
 local function update_control_button_styles()
-    local layout = DataPool().Layouts[LAYOUT_INDEX]
+    local layout = lc.pool_get(DataPool().Layouts, LAYOUT_INDEX)
     if layout == nil then
         return
     end
@@ -2634,7 +2729,7 @@ local function assign_clip_trigger_macro(element, macro_index)
 end
 
 local function apply_trigger_mode_to_layout(enabled)
-    local layout = DataPool().Layouts[LAYOUT_INDEX]
+    local layout = lc.pool_get(DataPool().Layouts, LAYOUT_INDEX)
     if layout == nil then
         return 0
     end
@@ -2874,7 +2969,7 @@ end
 
 --- Recolour one fader (scope 0 = composition) after a level change.
 function lc.update_level_display(scope, kind, value)
-    local layout = DataPool().Layouts[LAYOUT_INDEX]
+    local layout = lc.pool_get(DataPool().Layouts, LAYOUT_INDEX)
     if layout == nil then
         return
     end
@@ -2895,8 +2990,8 @@ function lc.update_level_display(scope, kind, value)
 end
 
 --- Build the X / B buttons and fader buttons left of the layer labels.
-function lc.add_layer_controls(layout, grid, first_macro_index)
-    local defs = lc.ensure_layer_control_macros(grid, first_macro_index)
+function lc.add_layer_controls(layout, grid)
+    local defs = lc.ensure_layer_control_macros(grid)
     local created = 0
     local layer_count = grid.layer_count or 0
 
@@ -3068,7 +3163,7 @@ local function build_layout(clips, grid, appearance_map)
     end
 
     if lc.SHOW_LAYER_CONTROLS then
-        created = created + lc.add_layer_controls(layout, grid, TRIGGER_MACRO_START + #clips)
+        created = created + lc.add_layer_controls(layout, grid)
     end
 
     created = created + add_control_buttons(layout, layer_count)
@@ -3114,7 +3209,7 @@ end
 --- Mark the fired clip as playing (and its layer neighbours idle) right away,
 --- without waiting for the next poll round-trip to confirm it.
 local function apply_fired_highlight(layer, column)
-    local layout = DataPool().Layouts[LAYOUT_INDEX]
+    local layout = lc.pool_get(DataPool().Layouts, LAYOUT_INDEX)
     if layout == nil then
         return
     end
@@ -3251,7 +3346,7 @@ end
 
 --- Returns ok, err, changed, stats_table
 local function update_playing_highlights()
-    local layout = DataPool().Layouts[LAYOUT_INDEX]
+    local layout = lc.pool_get(DataPool().Layouts, LAYOUT_INDEX)
     if layout == nil then
         return false, "Layout not found", 0, nil
     end
@@ -3724,7 +3819,7 @@ local function run_full_sync()
         return
     end
 
-    ensure_control_macros()
+    local ctl = ensure_control_macros() or {}
 
     Printf(
         "MA3ArenaDeck: layout ready (%d elements, %d clips, %d layer rows)",
@@ -3733,12 +3828,12 @@ local function run_full_sync()
         grid.layer_count
     )
     Printf(
-        "Controls: Macro %d SYNC | %d POLL ON | %d POLL OFF | %d INTERVAL | %d TRIG",
-        MACRO_START_INDEX,
-        MACRO_START_INDEX + 1,
-        MACRO_START_INDEX + 2,
-        MACRO_START_INDEX + 3,
-        MACRO_START_INDEX + 4
+        "Controls: Macro %s SYNC | %s POLL ON | %s POLL OFF | %s INTERVAL | %s TRIG",
+        tostring(ctl[1] and ctl[1].index or "-"),
+        tostring(ctl[2] and ctl[2].index or "-"),
+        tostring(ctl[3] and ctl[3].index or "-"),
+        tostring(ctl[4] and ctl[4].index or "-"),
+        tostring(ctl[5] and ctl[5].index or "-")
     )
     Printf(
         "Trigger mode: %s (tap clips %s)",
@@ -3753,6 +3848,7 @@ end
 
 function Main(display_handle, argument)
     load_config()
+    lc.resolve_layout_index(false)
 
     -- Normalize argument. Pool taps often pass nil; macros pass "sync"/etc.
     -- Some builds pass a non-string; coerce safely.
