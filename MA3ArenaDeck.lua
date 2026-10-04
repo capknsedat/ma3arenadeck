@@ -25,7 +25,7 @@ local signalTable = select(3, ...)
 local myHandle = select(4, ...)
 
 -- Bump when changing runtime behavior so System Monitor proves the reload.
-local PLUGIN_VERSION = "2026-10-04f"
+local PLUGIN_VERSION = "2026-10-04g"
 
 ------------------------------------------------------------------------
 -- Configuration (defaults; overridden by GlobalVars / setup dialog)
@@ -1546,14 +1546,7 @@ local function ensure_appearances_without_image(clip_id)
             local name = prefix .. tostring(clip_id)
             local idx = find_pool_index_by_name(appearances, name, APPEARANCE_START_INDEX, MAX_MEDIA_SLOTS)
             if idx then
-                local ok = pcall(function()
-                    appearances:Delete(idx)
-                end)
-                if not ok then
-                    pcall(function()
-                        Cmd(string.format("Delete Appearance %d /NoConfirm", idx))
-                    end)
-                end
+                lc.delete_appearance(idx)
             end
         end
     end
@@ -2089,36 +2082,103 @@ local function label_pos(layer_index, _layer_count)
     return x, y
 end
 
+--- Delete one appearance pool slot (references to it fall back to none).
+function lc.delete_appearance(index)
+    local appearances = get_appearances_pool()
+    if appearances == nil or index == nil then
+        return
+    end
+    pcall(function()
+        Cmd(string.format("Delete Appearance %d /NoConfirm", index))
+    end)
+    if pool_object_valid(appearances[index]) then
+        pcall(function()
+            appearances:Delete(index)
+        end)
+    end
+end
+
+--- Earlier versions gave buttons / their macros solid-colour appearances.
+--- Deleting those makes every button and macro that used them "none".
+lc.LEGACY_APPEARANCES = {
+    "MAD_Lvl_Off", "MAD_Lvl_master", "MAD_Lvl_audio", "MAD_Lvl_video",
+    "MAD_Bypass_On", "MAD_Bypass_Off", "MAD_Clear",
+    "MAD_Btn_PollOn_On", "MAD_Btn_PollOn_Off", "MAD_Btn_PollOff_On", "MAD_Btn_PollOff_Off",
+    "MAD_Btn_Interval", "MAD_Btn_Trig_On", "MAD_Btn_Trig_Off", "MAD_Btn_Sync",
+}
+
+function lc.delete_legacy_appearances()
+    local appearances = get_appearances_pool()
+    if appearances == nil then
+        return
+    end
+    local removed = 0
+    for _, name in ipairs(lc.LEGACY_APPEARANCES) do
+        local idx = find_pool_index_by_name(appearances, name, APPEARANCE_START_INDEX, MAX_MEDIA_SLOTS)
+        if idx then
+            lc.delete_appearance(idx)
+            removed = removed + 1
+        end
+    end
+    if removed > 0 then
+        Printf("MA3ArenaDeck: removed %d old button appearances", removed)
+    end
+end
+
 --- Set "no appearance" on a layout element and on the Macro it carries.
 --- With an appearance (even a plain colour) MA3 draws the macro's paper
 --- icon; with none the button is just its border and centred text.
+function lc.clear_object_appearance(obj, cmd_target)
+    if obj == nil then
+        return
+    end
+    local function empty()
+        local v = nil
+        pcall(function()
+            v = obj.Appearance
+        end)
+        return v == nil or v == "" or tostring(v) == "" or tostring(v) == "None"
+    end
+    if empty() then
+        return
+    end
+    pcall(function()
+        obj.Appearance = nil
+    end)
+    if not empty() then
+        pcall(function()
+            obj:Set("Appearance", "")
+        end)
+    end
+    if not empty() and cmd_target then
+        pcall(function()
+            Cmd(string.format('Set %s Property "Appearance" ""', cmd_target))
+        end)
+    end
+end
+
 function lc.clear_appearance(element)
     if element == nil then
         return
     end
-    pcall(function()
-        element:Set("Appearance", "")
-    end)
     local idx = nil
     pcall(function()
         idx = element:Index()
     end)
-    if idx then
-        pcall(function()
-            Cmd(string.format('Set Layout %d.%d Property "Appearance" ""', LAYOUT_INDEX, idx))
-        end)
-    end
+    lc.clear_object_appearance(
+        element,
+        idx and string.format("Layout %d.%d", LAYOUT_INDEX, idx) or nil
+    )
     local obj = nil
     pcall(function()
         obj = element.Object
     end)
     if obj ~= nil and type(obj) ~= "string" then
+        local midx = nil
         pcall(function()
-            obj:Set("Appearance", "")
+            midx = obj:Index()
         end)
-        pcall(function()
-            Cmd(string.format('Set Macro %d Property "Appearance" ""', obj:Index()))
-        end)
+        lc.clear_object_appearance(obj, midx and string.format("Macro %d", midx) or nil)
     end
 end
 
@@ -3149,6 +3209,7 @@ end
 --- Fire a queued layout tap (if any) and show it immediately, then run any
 --- queued layer / composition controls. Returns true when something ran.
 local function handle_pending_fire()
+    lc.poll_bound_fader()
     local acted = lc.process_pending_actions()
     local layer, column = process_pending_fire()
     if not layer then
@@ -3455,6 +3516,74 @@ function lc.fader_title(scope, kind)
     return string.format("Layer %d %s", scope, names[kind] or kind)
 end
 
+--- The popup fader is bound to a spare Playback Master (default 50), the
+--- way MA documents UiFader targets: we preset that master to the current
+--- level so the fader opens there, and the poll loop forwards its moves.
+--- A playback master only dims sequences explicitly assigned to it.
+function lc.fader_master()
+    local index = tonumber(cfg_get("FaderMaster", 50)) or 50
+    local master = nil
+    pcall(function()
+        master = ShowData().Masters.Playback[index]
+    end)
+    return master, index
+end
+
+function lc.read_master(master)
+    local v = nil
+    pcall(function()
+        v = master.NormedValue
+    end)
+    if v == nil then
+        pcall(function()
+            v = master:Get("NormedValue")
+        end)
+    end
+    return tonumber(tostring(v or ""):match("%-?[%d%.]+"))
+end
+
+--- Preset the master; returns the scale (100 = percent, 1 = 0..1) or nil.
+function lc.preset_master(master, frac)
+    local pct = math.floor(frac * 100 + 0.5)
+    pcall(function()
+        master.NormedValue = tostring(pct)
+    end)
+    local rb = lc.read_master(master)
+    if rb and math.abs(rb - pct) < 0.6 and pct > 1 then
+        return 100
+    end
+    pcall(function()
+        master.NormedValue = frac
+    end)
+    rb = lc.read_master(master)
+    if rb and math.abs(rb - frac) < 0.006 then
+        return 1
+    end
+    if rb and math.abs(rb - pct) < 0.6 then
+        return 100
+    end
+    return nil
+end
+
+--- Called from the poll loop: forward the bound fader's position.
+function lc.poll_bound_fader()
+    local b = lc.bound
+    if b == nil then
+        return false
+    end
+    local v = lc.read_master(b.master)
+    if v == nil then
+        return false
+    end
+    local frac = v / b.scale
+    if math.abs(frac - b.last) < 0.002 then
+        return false
+    end
+    b.last = frac
+    lc.queue_level(b.scope, b.kind, frac)
+    return true
+end
+
 --- Pop up a draggable fader for one layer / composition level.
 --- Returns true when the on-screen dialog was built.
 function lc.open_fader_dialog(scope, kind)
@@ -3546,8 +3675,32 @@ function lc.open_fader_dialog(scope, kind)
         local fader = frame:Append("UiFader")
         fader.Anchors = "0,0"
         fader.Text = lc.fader_label(scope, kind, current)
-        fader.PluginComponent = myHandle
-        fader.Changed = "MADFaderChanged"
+
+        -- Bind to the spare playback master preset to the current level.
+        lc.bound = nil
+        local master, master_index = lc.fader_master()
+        local scale = master and lc.preset_master(master, current) or nil
+        if master and scale then
+            fader.Target = master
+            fader.Property = "NormedValue"
+            lc.bound = {
+                master = master,
+                scale = scale,
+                scope = scope,
+                kind = kind,
+                last = current,
+            }
+            picked_up = true
+            Printf(
+                "MA3ArenaDeck: fader bound to Playback Master %d (scale %d)",
+                master_index,
+                scale
+            )
+        else
+            Printf("MA3ArenaDeck: fader not bound (Playback Master %d unavailable)", master_index)
+            fader.PluginComponent = myHandle
+            fader.Changed = "MADFaderChanged"
+        end
         pcall(function()
             local c = lc.LEVEL_COLOR[kind] or lc.LEVEL_COLOR.master
             fader.Color = string.format("%.3f,%.3f,%.3f,1", c.r / 255, c.g / 255, c.b / 255)
@@ -3555,7 +3708,7 @@ function lc.open_fader_dialog(scope, kind)
         -- Start at the current level where the build allows setting it
         -- (UiFader.Value is read-only on some versions; pick-up covers that).
         local pct = math.floor(current * 100 + 0.5)
-        local set_ok = pcall(function()
+        local set_ok = lc.bound ~= nil or pcall(function()
             fader.Value = pct
         end)
         if not set_ok then
@@ -3572,7 +3725,9 @@ function lc.open_fader_dialog(scope, kind)
         pcall(function()
             start = lc.parse_fader_value(fader.Value)
         end)
-        if start and math.abs(start - current) <= 0.03 then
+        if lc.bound ~= nil then
+            picked_up = true
+        elseif start and math.abs(start - current) <= 0.03 then
             picked_up = true
         else
             fader.Text = string.format(
@@ -3623,6 +3778,7 @@ local function run_full_sync()
 
     print_clips(clips, composition, grid)
 
+    lc.delete_legacy_appearances()
     local appearance_map = sync_thumbnails(clips)
 
     Printf("MA3ArenaDeck: building Layout %d '%s'...", LAYOUT_INDEX, LAYOUT_NAME)

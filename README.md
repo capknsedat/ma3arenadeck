@@ -124,7 +124,7 @@ Left of the layer labels, every layer row gets:
 
 Above the top layer, the **COMPOSITION** row has **X ALL** (disconnect all clips), **B** (composition bypass / blackout, toggles) and **GM** (grand master).
 
-**M / A / V / GM** show the current level. Tapping one opens a fader popup; drag it and Resolume follows (the newest position is sent on each poll step). If the popup cannot start at the current level, it only takes over once it reaches that level (shown as `A 20% -> 38%`), so nothing jumps. Opening a fader also starts **POLL**. Changes made directly in Resolume are not read back until the next **SYNC**.
+**M / A / V / GM** show the current level. Tapping one opens a fader popup; drag it and Resolume follows (the newest position is sent on each poll step). The popup fader is bound to **Playback Master 50**, preset to the current level so it opens there (no jump). Leave that master unassigned to any sequence; change the index with the GlobalVar `MA3ArenaDeck_FaderMaster` if 50 is in use. If the master cannot be used, the popup only takes over once it reaches the current level (shown as `A 20% -> 38%`). Opening a fader also starts **POLL**. Changes made directly in Resolume are not read back until the next **SYNC**.
 
 Playing clips: thicker **red** border (and optional name prefix `>`). Idle clips: black border.
 
