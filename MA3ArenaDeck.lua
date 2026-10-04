@@ -25,7 +25,7 @@ local signalTable = select(3, ...)
 local myHandle = select(4, ...)
 
 -- Bump when changing runtime behavior so System Monitor proves the reload.
-local PLUGIN_VERSION = "2026-10-04a"
+local PLUGIN_VERSION = "2026-10-04b"
 
 ------------------------------------------------------------------------
 -- Configuration (defaults; overridden by GlobalVars / setup dialog)
@@ -37,6 +37,9 @@ local INTERVAL_VAR = CFG_PREFIX .. "PollInterval"
 local TRIGGER_VAR = CFG_PREFIX .. "Trigger"
 -- Clip taps queue "L,C" here; the poll loop fires Resolume (no Plugin call).
 local FIRE_VAR = CFG_PREFIX .. "Fire"
+-- Layer / composition control taps (clear, bypass, fader steps) append
+-- ";action" here; the poll loop sends them to Resolume.
+local ACTION_VAR = CFG_PREFIX .. "Action"
 
 local RESOLUME_HOST = "127.0.0.1"
 local RESOLUME_PORT = 8080
@@ -94,6 +97,30 @@ local BUTTON_HEIGHT = 60
 local BUTTON_GAP = 12
 -- Extra offset below layer-1 row so controls never sit on the clip grid
 local BUTTON_ROW_OFFSET = 40
+
+-- Helpers / settings for layer controls and border colours live in one
+-- table: the main chunk is at the 200-local limit.
+local lc = {}
+
+-- Layer / composition controls left of the layer labels:
+--   [X] [M fader] [A fader] [V fader]   (one row per layer)
+--   [X] [B]       [Master fader]        (composition row above the top layer)
+-- A fader is a row of tap steps; the lit cells show the current level.
+lc.SHOW_LAYER_CONTROLS = true
+lc.LEVEL_STEPS = { 0, 0.25, 0.50, 0.75, 1.00 }
+lc.STEP_WIDTH = 30
+lc.STEP_GAP = 4
+lc.FADER_GAP = 14
+lc.CTRL_BTN_WIDTH = 60
+lc.LEVEL_COLOR = {
+    master = { r = 200, g = 200, b = 200 },
+    audio = { r = 230, g = 80, b = 140 },
+    video = { r = 80, g = 210, b = 140 },
+    off = { r = 45, g = 45, b = 50 },
+    clear = { r = 120, g = 30, b = 30 },
+    bypass_on = { r = 255, g = 0, b = 0 },
+    bypass_off = { r = 70, g = 70, b = 75 },
+}
 
 -- Control button colors (active = currently selected mode)
 local CTRL_COLOR = {
@@ -554,6 +581,58 @@ local function http_post(url, body, timeout_sec)
     return true, nil
 end
 
+--- PUT a JSON body (Resolume parameter updates). Treats 2xx as success.
+function lc.http_put(url, body, timeout_sec)
+    local previous_timeout = http.TIMEOUT
+    if timeout_sec ~= nil then
+        http.TIMEOUT = timeout_sec
+    end
+
+    body = body or ""
+    local response = {}
+    local ok, code, _headers, status = http.request({
+        url = url,
+        method = "PUT",
+        headers = {
+            ["Content-Type"] = "application/json",
+            ["Content-Length"] = tostring(#body),
+            ["Connection"] = "close",
+        },
+        source = ltn12.source.string(body),
+        sink = ltn12.sink.table(response),
+    })
+
+    if previous_timeout ~= nil then
+        http.TIMEOUT = previous_timeout
+    end
+
+    if not ok then
+        return nil, string.format("HTTP PUT failed: %s", tostring(code))
+    end
+    local status_code = tonumber(code) or 0
+    if status_code < 200 or status_code >= 300 then
+        return nil, string.format("HTTP %s (%s)", tostring(code), tostring(status))
+    end
+    return true, nil
+end
+
+function lc.layer_clear_url(layer_index)
+    return string.format(
+        "http://%s:%d/api/v1/composition/layers/%d/clear",
+        RESOLUME_HOST,
+        RESOLUME_PORT,
+        tonumber(layer_index) or 1
+    )
+end
+
+function lc.disconnect_all_url()
+    return string.format(
+        "http://%s:%d/api/v1/composition/disconnect-all",
+        RESOLUME_HOST,
+        RESOLUME_PORT
+    )
+end
+
 local function thumbnail_url(clip)
     if type(clip.thumbnail_path) == "string" and clip.thumbnail_path ~= "" then
         if clip.thumbnail_path:sub(1, 1) == "/" then
@@ -647,12 +726,17 @@ local function collect_clips(composition)
             end
         end
 
+        local video = type(layer.video) == "table" and layer.video or {}
+        local audio = type(layer.audio) == "table" and layer.audio or {}
         layers_meta[#layers_meta + 1] = {
             index = layer_index,
             id = layer.id,
             name = layer_name,
             filled = filled,
             columns = #layer_clips,
+            master = tonumber(param_value(layer.master, 1)) or 1,
+            opacity = tonumber(param_value(video.opacity, 1)) or 1,
+            volume = type(audio.volume) == "table" and audio.volume or nil,
         }
     end
 
@@ -670,6 +754,8 @@ local function collect_clips(composition)
         layers = layers_meta,
         layer_count = #layers_meta,
         max_column = max_column,
+        master = tonumber(param_value(composition.master, 1)) or 1,
+        bypassed = param_value(composition.bypassed, false) == true,
     }
 end
 
@@ -1215,11 +1301,11 @@ local function style_idle_appearance(appearance)
 end
 
 -- Remember which border-color write works on this console (avoid Cmd spam).
--- nil = not probed yet, false = nothing worked, else index into BORDER_COLOR_WAYS.
+-- nil = not probed yet, false = nothing worked, else index into lc.BORDER_COLOR_WAYS.
 local border_color_way = nil
 local border_color_logged = false
 
-local function color_formats(r, g, b)
+function lc.color_formats(r, g, b)
     return {
         -- grandMA3 colour properties are 0..1 floats (same as Appearance "Color").
         float = string.format("%.3f,%.3f,%.3f,1", r / 255, g / 255, b / 255),
@@ -1228,7 +1314,7 @@ local function color_formats(r, g, b)
     }
 end
 
-local BORDER_COLOR_WAYS = {
+lc.BORDER_COLOR_WAYS = {
     { prop = "BorderColor", fmt = "float" },
     { prop = "BorderColor", fmt = "hex" },
     { prop = "BorderColor", fmt = "int" },
@@ -1237,7 +1323,7 @@ local BORDER_COLOR_WAYS = {
     { prop = "BorderColor", fmt = "int", cmd = true },
 }
 
-local function read_element_prop(element, prop)
+function lc.read_element_prop(element, prop)
     local value = nil
     pcall(function()
         value = element:Get(prop)
@@ -1254,7 +1340,7 @@ local function read_element_prop(element, prop)
 end
 
 --- True when a read-back colour string matches the wanted 0-255 RGB.
-local function color_matches(readback, r, g, b)
+function lc.color_matches(readback, r, g, b)
     if type(readback) ~= "string" or readback == "" then
         return false
     end
@@ -1289,8 +1375,8 @@ local function color_matches(readback, r, g, b)
     return true
 end
 
-local function write_border_color(element, way, r, g, b)
-    local value = color_formats(r, g, b)[way.fmt]
+function lc.write_border_color(element, way, r, g, b)
+    local value = lc.color_formats(r, g, b)[way.fmt]
     if way.cmd then
         local idx = nil
         pcall(function()
@@ -1323,37 +1409,37 @@ local function set_element_border_color(element, r, g, b)
     end
 
     if border_color_way then
-        write_border_color(element, BORDER_COLOR_WAYS[border_color_way], r, g, b)
+        lc.write_border_color(element, lc.BORDER_COLOR_WAYS[border_color_way], r, g, b)
         return
     end
     if border_color_way == false then
         return
     end
 
-    local before = read_element_prop(element, "BorderColor")
-    for i, way in ipairs(BORDER_COLOR_WAYS) do
-        if write_border_color(element, way, r, g, b)
-            and color_matches(read_element_prop(element, way.prop), r, g, b)
+    local before = lc.read_element_prop(element, "BorderColor")
+    for i, way in ipairs(lc.BORDER_COLOR_WAYS) do
+        if lc.write_border_color(element, way, r, g, b)
+            and lc.color_matches(lc.read_element_prop(element, way.prop), r, g, b)
         then
             border_color_way = i
             Printf(
                 "MA3ArenaDeck: border colour via %s (%s) -> '%s'",
                 way.prop,
                 way.fmt,
-                tostring(read_element_prop(element, way.prop))
+                tostring(lc.read_element_prop(element, way.prop))
             )
             return
         end
     end
 
     -- Nothing verified: keep the float write (most likely format) but say so.
-    write_border_color(element, BORDER_COLOR_WAYS[1], r, g, b)
+    lc.write_border_color(element, lc.BORDER_COLOR_WAYS[1], r, g, b)
     if not border_color_logged then
         border_color_logged = true
         Printf(
             "MA3ArenaDeck: border colour not confirmed (BorderColor was '%s', now '%s'); using appearance colours",
             tostring(before),
-            tostring(read_element_prop(element, "BorderColor"))
+            tostring(lc.read_element_prop(element, "BorderColor"))
         )
     end
     border_color_way = 1
@@ -1791,6 +1877,136 @@ local function ensure_clip_trigger_macros(clips)
     return map
 end
 
+--- Resolume layer audio volume is a dB range (e.g. -192..12); fader steps
+--- are 0..1, so convert both ways. Linear 0..1 ranges pass through.
+function lc.volume_is_db(param)
+    if type(param) ~= "table" then
+        return false
+    end
+    local min = tonumber(param.min) or 0
+    local max = tonumber(param.max) or 1
+    return min < 0 or max > 1
+end
+
+function lc.fraction_to_volume(param, p)
+    if not lc.volume_is_db(param) then
+        return p
+    end
+    local min = tonumber(param.min) or -192
+    local max = tonumber(param.max) or 0
+    if p <= 0 then
+        return min
+    end
+    local db = 20 * math.log(p) / math.log(10)
+    if db < min then
+        db = min
+    end
+    if db > max then
+        db = max
+    end
+    return db
+end
+
+function lc.volume_to_fraction(param)
+    if type(param) ~= "table" then
+        return 1
+    end
+    local v = tonumber(param_value(param, 0)) or 0
+    if not lc.volume_is_db(param) then
+        return v
+    end
+    local min = tonumber(param.min) or -192
+    if v <= min + 0.5 then
+        return 0
+    end
+    local p = 10 ^ (v / 20)
+    if p > 1 then
+        p = 1
+    end
+    return p
+end
+
+function lc.action_macro_line(action)
+    return string.format(
+        'Lua "SetVar(GlobalVars(), \'%s\', tostring(GetVar(GlobalVars(), \'%s\') or \'\') .. \';%s\')"',
+        ACTION_VAR,
+        ACTION_VAR,
+        action
+    )
+end
+
+--- Macros for layer / composition controls, placed after the clip macros.
+--- Returns a list of { macro_index, action, ... } definitions in build order.
+function lc.ensure_layer_control_macros(grid, first_index)
+    local defs = {}
+    local function add(def)
+        def.macro_index = first_index + #defs
+        defs[#defs + 1] = def
+    end
+
+    add({ scope = 0, kind = "clear", action = "clearall", name = "MAD_ClearAll" })
+    add({ scope = 0, kind = "bypass", action = "bypass", name = "MAD_Bypass" })
+    for _, step in ipairs(lc.LEVEL_STEPS) do
+        add({
+            scope = 0,
+            kind = "master",
+            step = step,
+            action = string.format("lvl,0,master,%.2f,%.4f", step, step),
+            name = string.format("MAD_Master_%d", math.floor(step * 100 + 0.5)),
+        })
+    end
+
+    for _, layer in ipairs(grid.layers or {}) do
+        local L = layer.index
+        add({
+            scope = L,
+            kind = "clear",
+            action = string.format("clear,%d", L),
+            name = string.format("MAD_L%d_Clear", L),
+        })
+        for _, kind in ipairs({ "master", "audio", "video" }) do
+            for _, step in ipairs(lc.LEVEL_STEPS) do
+                local raw = step
+                if kind == "audio" then
+                    raw = lc.fraction_to_volume(layer.volume, step)
+                end
+                add({
+                    scope = L,
+                    kind = kind,
+                    step = step,
+                    action = string.format("lvl,%d,%s,%.2f,%.4f", L, kind, step, raw),
+                    name = string.format(
+                        "MAD_L%d_%s_%d",
+                        L,
+                        kind:sub(1, 1):upper(),
+                        math.floor(step * 100 + 0.5)
+                    ),
+                })
+            end
+        end
+    end
+
+    if #defs > 0 then
+        ensure_macro(defs[#defs].macro_index)
+    end
+    for _, def in ipairs(defs) do
+        local macro = ensure_macro(def.macro_index)
+        if macro == nil then
+            Printf("MA3ArenaDeck: could not create control Macro %d", def.macro_index)
+            def.macro_index = nil
+        else
+            macro:Set("Name", def.name)
+            write_macro_lines(macro, def.macro_index, { lc.action_macro_line(def.action) })
+        end
+    end
+    Printf(
+        "MA3ArenaDeck: layer control macros ready (%d, start=%d)",
+        #defs,
+        first_index
+    )
+    return defs
+end
+
 ------------------------------------------------------------------------
 -- Output
 ------------------------------------------------------------------------
@@ -2043,8 +2259,10 @@ local function cleanup_stray_rcs_macro_elements(layout)
 
         local is_ctrl_button = type(note) == "string" and note:find("^resolume%-ctrl:") ~= nil
         local is_clip = type(note) == "string" and note:find("^resolume%-clip:") ~= nil
-        -- Clip cells may have MAD_Fire_* macros assigned when trigger mode is on.
-        if not is_ctrl_button and not is_clip then
+        local is_level = type(note) == "string" and note:find("^resolume%-lvl:") ~= nil
+        -- Clip cells may have MAD_Fire_* macros assigned when trigger mode is on;
+        -- layer / composition control cells always carry their MAD_* macro.
+        if not is_ctrl_button and not is_clip and not is_level then
             local obj_name = ""
             pcall(function()
                 local obj = el.Object
@@ -2553,6 +2771,194 @@ local function add_control_buttons(layout, layer_count)
     return created
 end
 
+function lc.level_note(scope, kind, step)
+    return string.format("resolume-lvl:%d:%s:%.2f", scope, kind, step or 0)
+end
+
+function lc.parse_level_note(note)
+    if type(note) ~= "string" then
+        return nil
+    end
+    local scope, kind, step = note:match("^resolume%-lvl:(%d+):(%a+):([%d%.]+)")
+    if not scope then
+        return nil
+    end
+    return tonumber(scope), kind, tonumber(step)
+end
+
+function lc.level_cell_appearance(kind, lit)
+    if not lit then
+        local c = lc.LEVEL_COLOR.off
+        return ensure_solid_appearance("MAD_Lvl_Off", c.r, c.g, c.b)
+    end
+    local c = lc.LEVEL_COLOR[kind] or lc.LEVEL_COLOR.master
+    return ensure_solid_appearance("MAD_Lvl_" .. kind, c.r, c.g, c.b)
+end
+
+function lc.bypass_appearance(on)
+    local c = on and lc.LEVEL_COLOR.bypass_on or lc.LEVEL_COLOR.bypass_off
+    return ensure_solid_appearance(on and "MAD_Bypass_On" or "MAD_Bypass_Off", c.r, c.g, c.b)
+end
+
+function lc.style_level_cell(element, kind, step, value)
+    local lit = step <= (value or 0) + 0.001
+    assign_appearance(element, lc.level_cell_appearance(kind, lit))
+    local c = lit and (lc.LEVEL_COLOR[kind] or lc.LEVEL_COLOR.master) or lc.LEVEL_COLOR.off
+    set_element_border_color(element, c.r, c.g, c.b)
+end
+
+function lc.style_bypass_button(element, on)
+    assign_appearance(element, lc.bypass_appearance(on))
+    pcall(function()
+        element:Set("customtexttext", on and "B ON" or "B")
+    end)
+end
+
+function lc.get_bypass_flag()
+    return cfg_get_bool("Bypassed", false)
+end
+
+function lc.set_bypass_flag(on)
+    cfg_set("Bypassed", on and "1" or "0")
+end
+
+--- Recolour one fader (scope 0 = composition) after a level change.
+function lc.update_level_display(scope, kind, value)
+    local layout = DataPool().Layouts[LAYOUT_INDEX]
+    if layout == nil then
+        return
+    end
+    for _, element in ipairs(layout:Children()) do
+        local note = nil
+        pcall(function()
+            note = element.Note or element.note
+        end)
+        local s_scope, s_kind, s_step = lc.parse_level_note(note)
+        if s_scope == scope and kind == "bypass" and s_kind == "bypass" then
+            lc.style_bypass_button(element, value and true or false)
+        elseif s_scope == scope and s_kind == kind and s_step and kind ~= "bypass" then
+            lc.style_level_cell(element, kind, s_step, value)
+        end
+    end
+end
+
+--- Build the X / B buttons and step faders left of the layer labels.
+function lc.add_layer_controls(layout, grid, first_macro_index)
+    local defs = lc.ensure_layer_control_macros(grid, first_macro_index)
+    local created = 0
+    local layer_count = grid.layer_count or 0
+
+    local levels = { [0] = { master = grid.master or 1 } }
+    for _, layer in ipairs(grid.layers or {}) do
+        levels[layer.index] = {
+            master = layer.master or 1,
+            video = layer.opacity or 1,
+            audio = lc.volume_to_fraction(layer.volume),
+        }
+    end
+    lc.set_bypass_flag(grid.bypassed)
+
+    local fader_w = (#lc.LEVEL_STEPS * lc.STEP_WIDTH) + ((#lc.LEVEL_STEPS - 1) * lc.STEP_GAP)
+    local strip_w = lc.CTRL_BTN_WIDTH + lc.FADER_GAP + 3 * (fader_w + lc.FADER_GAP)
+    local x0 = ORIGIN_X - strip_w
+
+    local function row_y(scope)
+        if scope == 0 then
+            -- Composition row sits above the top layer (Y-up).
+            return ORIGIN_Y + (layer_count * (CELL_HEIGHT + CELL_GAP_Y))
+        end
+        local _, y = label_pos(scope, layer_count)
+        return y
+    end
+
+    local function fader_x(scope, kind)
+        local slot
+        if scope == 0 then
+            slot = 2 -- after X and B
+        else
+            slot = ({ master = 0, audio = 1, video = 2 })[kind] or 0
+        end
+        return x0 + lc.CTRL_BTN_WIDTH + lc.FADER_GAP + slot * (fader_w + lc.FADER_GAP)
+    end
+
+    local step_pos = {}
+    for i, step in ipairs(lc.LEVEL_STEPS) do
+        step_pos[string.format("%.2f", step)] = i - 1
+    end
+
+    for _, def in ipairs(defs) do
+        if def.macro_index then
+            local y = row_y(def.scope)
+            local opts = {
+                y = y,
+                height = CELL_HEIGHT,
+                text_size = 14,
+                border = 3,
+            }
+            if def.kind == "clear" then
+                opts.x = x0
+                opts.width = lc.CTRL_BTN_WIDTH
+                opts.text = def.scope == 0 and "X ALL" or "X"
+                opts.text_size = 20
+                opts.note = lc.level_note(def.scope, "clear", 0)
+            elseif def.kind == "bypass" then
+                opts.x = x0 + lc.CTRL_BTN_WIDTH + lc.FADER_GAP
+                opts.width = fader_w
+                opts.text = "B"
+                opts.text_size = 20
+                opts.note = lc.level_note(def.scope, "bypass", 0)
+            else
+                local i = step_pos[string.format("%.2f", def.step)] or 0
+                opts.x = fader_x(def.scope, def.kind) + i * (lc.STEP_WIDTH + lc.STEP_GAP)
+                opts.width = lc.STEP_WIDTH
+                opts.height = CELL_HEIGHT
+                opts.text_size = 10
+                opts.text_align_v = "Bottom"
+                if i == 0 then
+                    local letter = def.kind == "master" and "M" or def.kind:sub(1, 1):upper()
+                    opts.text = def.scope == 0 and "GM" or letter
+                else
+                    opts.text = tostring(math.floor(def.step * 100 + 0.5))
+                end
+                opts.note = lc.level_note(def.scope, def.kind, def.step)
+            end
+
+            local el = add_element(layout, opts)
+            if el then
+                assign_clip_trigger_macro(el, def.macro_index)
+                if def.kind == "clear" then
+                    local c = lc.LEVEL_COLOR.clear
+                    assign_appearance(el, ensure_solid_appearance("MAD_Clear", c.r, c.g, c.b))
+                elseif def.kind == "bypass" then
+                    lc.style_bypass_button(el, grid.bypassed)
+                else
+                    local lv = levels[def.scope] and levels[def.scope][def.kind] or 1
+                    lc.style_level_cell(el, def.kind, def.step, lv)
+                end
+                created = created + 1
+            end
+        end
+    end
+
+    -- Composition label in the layer-label column.
+    local cx, _ = label_pos(1, layer_count)
+    local el = add_element(layout, {
+        x = cx,
+        y = row_y(0),
+        width = LABEL_WIDTH - CELL_GAP_X,
+        height = CELL_HEIGHT,
+        text = "COMPOSITION",
+        text_size = 14,
+        border = LAYER_BORDER_SIZE,
+        note = "resolume-layer:composition",
+    })
+    if el then
+        set_element_border_color(el, LAYER_BORDER_R, LAYER_BORDER_G, LAYER_BORDER_B)
+        created = created + 1
+    end
+    return created
+end
+
 local function build_layout(clips, grid, appearance_map)
     local layout, err = ensure_layout()
     if not layout then
@@ -2632,6 +3038,10 @@ local function build_layout(clips, grid, appearance_map)
         end
     end
 
+    if lc.SHOW_LAYER_CONTROLS then
+        created = created + lc.add_layer_controls(layout, grid, TRIGGER_MACRO_START + #clips)
+    end
+
     created = created + add_control_buttons(layout, layer_count)
     cleanup_stray_rcs_macro_elements(layout)
 
@@ -2684,8 +3094,9 @@ local function apply_fired_highlight(layer, column)
             note = element.Note or element.note
         end)
         local meta = parse_clip_note(note)
-        if meta and meta.layer == layer then
-            local playing = meta.column == column
+        -- layer nil = every layer (clear all); column nil = nothing playing.
+        if meta and (layer == nil or meta.layer == layer) then
+            local playing = column ~= nil and meta.column == column
             if playing ~= meta.playing then
                 apply_element_playing_state(element, meta, playing)
             end
@@ -2693,12 +3104,97 @@ local function apply_fired_highlight(layer, column)
     end
 end
 
---- Fire a queued layout tap (if any) and show it immediately.
---- Returns true when a clip was fired.
+function lc.layer_level_body(kind, value)
+    if kind == "video" then
+        return string.format('{"video":{"opacity":{"value":%.4f}}}', value)
+    elseif kind == "audio" then
+        return string.format('{"audio":{"volume":{"value":%.4f}}}', value)
+    end
+    return string.format('{"master":{"value":%.4f}}', value)
+end
+
+--- Run one queued control action. Returns true when Resolume accepted it.
+function lc.run_control_action(action)
+    local t0 = Time()
+    local ok, err, what
+
+    if action == "clearall" then
+        what = "clear all"
+        ok, err = http_post(lc.disconnect_all_url(), "", 2)
+        if ok then
+            apply_fired_highlight(nil, nil)
+        end
+    elseif action == "bypass" then
+        local on = not lc.get_bypass_flag()
+        what = on and "bypass ON" or "bypass OFF"
+        ok, err = lc.http_put(
+            composition_url(),
+            string.format('{"bypassed":{"value":%s}}', on and "true" or "false"),
+            2
+        )
+        if ok then
+            lc.set_bypass_flag(on)
+            lc.update_level_display(0, "bypass", on)
+        end
+    else
+        local clear_layer = action:match("^clear,(%d+)$")
+        local L, kind, step, raw = action:match("^lvl,(%d+),(%a+),([%d%.]+),(%-?[%d%.]+)$")
+        if clear_layer then
+            what = "clear L" .. clear_layer
+            ok, err = http_post(lc.layer_clear_url(clear_layer), "", 2)
+            if ok then
+                apply_fired_highlight(tonumber(clear_layer), nil)
+            end
+        elseif L then
+            L = tonumber(L)
+            what = string.format("L%d %s %s%%", L, kind, tostring(math.floor(tonumber(step) * 100 + 0.5)))
+            local url = L == 0 and composition_url() or layer_url(L)
+            ok, err = lc.http_put(url, lc.layer_level_body(kind, tonumber(raw) or 0), 2)
+            if ok then
+                lc.update_level_display(L, kind, tonumber(step) or 0)
+            end
+        else
+            Printf("MA3ArenaDeck: unknown control action '%s'", tostring(action))
+            return false
+        end
+    end
+
+    if ok then
+        Printf("MA3ArenaDeck: %s (%.2fs)", what, Time() - t0)
+        return true
+    end
+    Printf("MA3ArenaDeck: %s FAILED (%s)", tostring(what), tostring(err))
+    return false
+end
+
+--- Layer / composition control taps queued as ";action;action" in ACTION_VAR.
+function lc.process_pending_actions()
+    local v = nil
+    pcall(function()
+        v = GetVar(GlobalVars(), ACTION_VAR)
+    end)
+    if v == nil or v == "" or v == 0 or v == "0" then
+        return false
+    end
+    pcall(function()
+        SetVar(GlobalVars(), ACTION_VAR, "")
+    end)
+    local any = false
+    for action in tostring(v):gmatch("[^;]+") do
+        if lc.run_control_action(action) then
+            any = true
+        end
+    end
+    return any
+end
+
+--- Fire a queued layout tap (if any) and show it immediately, then run any
+--- queued layer / composition controls. Returns true when something ran.
 local function handle_pending_fire()
+    local acted = lc.process_pending_actions()
     local layer, column = process_pending_fire()
     if not layer then
-        return false
+        return acted
     end
     apply_fired_highlight(layer, column)
     return true

@@ -111,6 +111,21 @@ If both run on the **same computer**, change Resolume’s listen port (for examp
 | **POLL x.xxs** | Cycles poll interval (`0.10` → `0.25` → `0.50` → `1.00` → `2.00` s) |
 | **TRIG ON / OFF** | When **ON**, tapping a clip cell triggers that clip in Resolume; poll is started so highlights stay in sync |
 
+### Layer & composition controls
+
+Left of the layer labels, every layer row gets:
+
+| Control | Action in Resolume |
+| --- | --- |
+| **X** | Clear the layer (same as the layer's X) |
+| **M** fader | Layer master |
+| **A** fader | Layer audio volume |
+| **V** fader | Layer video opacity |
+
+Above the top layer, the **COMPOSITION** row has **X ALL** (disconnect all clips), **B** (composition bypass / blackout, toggles) and the **GM** grand master fader.
+
+Faders are rows of tap steps (0 / 25 / 50 / 75 / 100 %); lit cells show the level last set from MA3. Changes made directly in Resolume are not read back until the next **SYNC**. Like clip taps, these controls are sent while **POLL** (or **TRIG**) is on.
+
 Playing clips: thicker **red** border (and optional name prefix `>`). Idle clips: black border.
 
 With **TRIG ON**, a tapped clip is sent to Resolume within a few tens of milliseconds (taps are checked between every poll request and while waiting for the next poll) and turns red immediately; the next poll confirms the state. Run **SYNC** once after updating so the playing-clip appearances get the new tint.
