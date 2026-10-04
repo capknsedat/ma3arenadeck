@@ -25,7 +25,7 @@ local signalTable = select(3, ...)
 local myHandle = select(4, ...)
 
 -- Bump when changing runtime behavior so System Monitor proves the reload.
-local PLUGIN_VERSION = "2026-10-04h"
+local PLUGIN_VERSION = "2026-10-04i"
 
 ------------------------------------------------------------------------
 -- Configuration (defaults; overridden by GlobalVars / setup dialog)
@@ -114,9 +114,9 @@ lc.SCAN_PER_TICK = 2
 --   [X] [B] [GM]      (composition row above the top layer)
 -- M / A / V / GM show the level; tapping one opens a fader popup.
 lc.SHOW_LAYER_CONTROLS = true
-lc.FADER_BTN_WIDTH = 60
+lc.FADER_BTN_WIDTH = 70
 lc.FADER_GAP = 14
-lc.CTRL_BTN_WIDTH = 60
+lc.CTRL_BTN_WIDTH = 70
 lc.LEVEL_COLOR = {
     master = { r = 200, g = 200, b = 200 },
     audio = { r = 230, g = 80, b = 140 },
@@ -3550,6 +3550,8 @@ end
 function lc.open_fader_dialog(scope, kind)
     local current = lc.get_level(scope, kind)
 
+    local picked_up = false
+    local last_frac = nil
     local signals = signalTable or {}
     signals.MADFaderChanged = function(caller)
         local value = nil
@@ -3562,9 +3564,32 @@ function lc.open_fader_dialog(scope, kind)
             end)
         end
         local frac = lc.parse_fader_value(value)
-        if frac then
-            lc.queue_level(scope, kind, frac)
+        if not frac then
+            return
         end
+        -- Pick-up: the popup fader may open at 0 instead of the current
+        -- level. Send nothing until it reaches / crosses the current level,
+        -- so grabbing it never makes the picture or sound jump.
+        if not picked_up then
+            local near = math.abs(frac - current) <= 0.03
+            local crossed = last_frac ~= nil and (last_frac - current) * (frac - current) <= 0
+            last_frac = frac
+            if not (near or crossed) then
+                pcall(function()
+                    caller.Text = string.format(
+                        "%s -> %d%%",
+                        lc.fader_label(scope, kind, frac),
+                        math.floor(current * 100 + 0.5)
+                    )
+                end)
+                return
+            end
+            picked_up = true
+        end
+        pcall(function()
+            caller.Text = lc.fader_label(scope, kind, frac)
+        end)
+        lc.queue_level(scope, kind, frac)
     end
 
     local ok, err = pcall(function()
@@ -3617,10 +3642,35 @@ function lc.open_fader_dialog(scope, kind)
             local c = lc.LEVEL_COLOR[kind] or lc.LEVEL_COLOR.master
             fader.Color = string.format("%.3f,%.3f,%.3f,1", c.r / 255, c.g / 255, c.b / 255)
         end)
-        -- Start at the current level where the build allows setting it.
-        pcall(function()
-            fader.Value = string.format("%d%%", math.floor(current * 100 + 0.5))
+        -- Start at the current level where the build allows setting it
+        -- (UiFader.Value is read-only on some versions; pick-up covers that).
+        local pct = math.floor(current * 100 + 0.5)
+        local set_ok = pcall(function()
+            fader.Value = pct
         end)
+        if not set_ok then
+            set_ok = pcall(function()
+                fader:Set("Value", tostring(pct))
+            end)
+        end
+        if not set_ok then
+            pcall(function()
+                fader.Value = string.format("%d%%", pct)
+            end)
+        end
+        local start = nil
+        pcall(function()
+            start = lc.parse_fader_value(fader.Value)
+        end)
+        if start and math.abs(start - current) <= 0.03 then
+            picked_up = true
+        else
+            fader.Text = string.format(
+                "%s (%d%%)",
+                lc.fader_title(scope, kind),
+                pct
+            )
+        end
     end)
 
     if ok then
