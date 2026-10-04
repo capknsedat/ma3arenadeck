@@ -25,12 +25,12 @@ local signalTable = select(3, ...)
 local myHandle = select(4, ...)
 
 -- Bump when changing runtime behavior so System Monitor proves the reload.
-local PLUGIN_VERSION = "2026-10-04n"
+local PLUGIN_VERSION = "2026-10-04q"
 
 ------------------------------------------------------------------------
 -- Configuration (defaults; overridden by GlobalVars / setup dialog)
 ------------------------------------------------------------------------
-local CFG_PREFIX = "MA3ArenaDeck_"
+local CFG_PREFIX = "ResArena_"
 local MONITOR_VAR = CFG_PREFIX .. "Monitor"
 local MONITOR_OWNER_VAR = CFG_PREFIX .. "MonitorOwner"
 local INTERVAL_VAR = CFG_PREFIX .. "PollInterval"
@@ -64,9 +64,9 @@ local IMAGE_POOL = 3
 local IMAGE_START_INDEX = 200
 local APPEARANCE_START_INDEX = 200
 local MAX_MEDIA_SLOTS = 300
-local IMAGE_NAME_PREFIX = "MAD_"
-local APPEARANCE_IDLE_PREFIX = "MAD_"
-local APPEARANCE_PLAY_PREFIX = "MADP_"
+local IMAGE_NAME_PREFIX = "Res_"
+local APPEARANCE_IDLE_PREFIX = "Res_"
+local APPEARANCE_PLAY_PREFIX = "ResP_"
 
 -- Status polling
 local POLL_INTERVAL_SEC = 0.25
@@ -89,10 +89,8 @@ local LAYER_BORDER_R = 0
 local LAYER_BORDER_G = 0
 local LAYER_BORDER_B = 0
 
--- Control macros + buttons under the grid
-local MACRO_START_INDEX = 200
--- Per-clip fire macros start after the 5 control macros (200-204)
-local TRIGGER_MACRO_START = MACRO_START_INDEX + 10
+-- Macros have no start slot: each is found by its own name, else written
+-- to the first empty macro slot (see lc.macro_slot). Never a used slot.
 local BUTTON_WIDTH = 128
 local BUTTON_HEIGHT = 60
 local BUTTON_GAP = 12
@@ -229,11 +227,6 @@ local function set_poll_interval(sec)
     return value
 end
 
-local function refresh_derived_indexes()
-    -- Per-clip fire macros sit after the 5 control macros, with headroom.
-    TRIGGER_MACRO_START = MACRO_START_INDEX + 10
-end
-
 local function load_config()
     RESOLUME_HOST = tostring(cfg_get("Host", RESOLUME_HOST))
     RESOLUME_PORT = tonumber(cfg_get("Port", RESOLUME_PORT)) or RESOLUME_PORT
@@ -242,8 +235,6 @@ local function load_config()
     IMAGE_START_INDEX = tonumber(cfg_get("ImageStart", IMAGE_START_INDEX)) or IMAGE_START_INDEX
     APPEARANCE_START_INDEX = tonumber(cfg_get("AppearanceStart", APPEARANCE_START_INDEX))
         or APPEARANCE_START_INDEX
-    MACRO_START_INDEX = tonumber(cfg_get("MacroStart", MACRO_START_INDEX)) or MACRO_START_INDEX
-    refresh_derived_indexes()
     ONLY_WITH_THUMBNAIL = cfg_get_bool("OnlyWithThumbnail", ONLY_WITH_THUMBNAIL)
     FETCH_THUMBNAILS = cfg_get_bool("FetchThumbnails", FETCH_THUMBNAILS)
     HIGHLIGHT_PREVIEWING = cfg_get_bool("HighlightPreviewing", HIGHLIGHT_PREVIEWING)
@@ -257,7 +248,6 @@ local function save_config()
     cfg_set("LayoutName", LAYOUT_NAME)
     cfg_set("ImageStart", tostring(IMAGE_START_INDEX))
     cfg_set("AppearanceStart", tostring(APPEARANCE_START_INDEX))
-    cfg_set("MacroStart", tostring(MACRO_START_INDEX))
     cfg_set("OnlyWithThumbnail", ONLY_WITH_THUMBNAIL and "1" or "0")
     cfg_set("FetchThumbnails", FETCH_THUMBNAILS and "1" or "0")
     cfg_set("HighlightPreviewing", HIGHLIGHT_PREVIEWING and "1" or "0")
@@ -334,13 +324,7 @@ local function show_setup_dialog(display_handle)
                 vkPlugin = "TextInputNumOnly",
             },
             {
-                name = "07 Macro Start",
-                value = tostring(MACRO_START_INDEX),
-                whiteFilter = "0123456789",
-                vkPlugin = "TextInputNumOnly",
-            },
-            {
-                name = "08 Poll Interval (s)",
+                name = "07 Poll Interval (s)",
                 value = string.format("%.2f", get_poll_interval()),
                 whiteFilter = "0123456789.",
                 vkPlugin = "TextInputNumOnly",
@@ -423,11 +407,8 @@ local function show_setup_dialog(display_handle)
         or IMAGE_START_INDEX
     APPEARANCE_START_INDEX = tonumber(mb_input(result, "06 Appearance Start", APPEARANCE_START_INDEX))
         or APPEARANCE_START_INDEX
-    MACRO_START_INDEX = tonumber(mb_input(result, "07 Macro Start", MACRO_START_INDEX))
-        or MACRO_START_INDEX
-    refresh_derived_indexes()
     POLL_INTERVAL_SEC = nearest_poll_interval(
-        mb_input(result, "08 Poll Interval (s)", POLL_INTERVAL_SEC)
+        mb_input(result, "07 Poll Interval (s)", POLL_INTERVAL_SEC)
     )
     FETCH_THUMBNAILS = mb_state(result, "Fetch thumbnails", FETCH_THUMBNAILS)
     ONLY_WITH_THUMBNAIL = mb_state(result, "Only clips with thumbnail", ONLY_WITH_THUMBNAIL)
@@ -1093,6 +1074,55 @@ local function ensure_macro(index)
     return nil
 end
 
+--- Macro slots by name: one scan of the Macros pool per run, then each
+--- plugin macro reuses the slot already carrying its name, or takes the
+--- first empty slot. A slot holding any other macro is never touched.
+function lc.scan_macro_slots()
+    lc.macro_by_name = {}
+    lc.macro_used = {}
+    lc.macro_next_free = 1
+    local macros = DataPool().Macros
+    if macros == nil then
+        return
+    end
+    local count = 0
+    pcall(function()
+        count = tonumber(macros:Count()) or 0
+    end)
+    for i = 1, count do
+        local obj = macros[i]
+        if pool_object_valid(obj) then
+            lc.macro_used[i] = true
+            local name = object_name(obj)
+            if name ~= nil and lc.macro_by_name[name] == nil then
+                lc.macro_by_name[name] = i
+            end
+        end
+    end
+end
+
+function lc.macro_slot(name)
+    if lc.macro_by_name == nil then
+        lc.scan_macro_slots()
+    end
+    local index = lc.macro_by_name[name]
+    if index then
+        local obj = DataPool().Macros[index]
+        if not pool_object_valid(obj) or object_name(obj) == name then
+            return index
+        end
+    end
+    local i = lc.macro_next_free
+    while lc.macro_used[i] or pool_object_valid(DataPool().Macros[i]) do
+        lc.macro_used[i] = true
+        i = i + 1
+    end
+    lc.macro_used[i] = true
+    lc.macro_next_free = i + 1
+    lc.macro_by_name[name] = i
+    return i
+end
+
 local function find_pool_index_by_name(pool, name, start_index, max_slots)
     for i = start_index, start_index + max_slots - 1 do
         local obj = pool[i]
@@ -1184,8 +1214,8 @@ local function delete_image_slot(images, image_index)
 end
 
 --- Import via the one path this build accepts without Illegal object spam:
----   Import Image Library "MAD_….png.xml" At Image 3.N
---- Do not try embedded MAD_….xml library import — that logs Illegal object.
+---   Import Image Library "Res_….png.xml" At Image 3.N
+--- Do not try embedded Res_….xml library import — that logs Illegal object.
 local function try_import_image(images, image_index, files)
     delete_image_slot(images, image_index)
 
@@ -1766,8 +1796,7 @@ local function ensure_control_macros()
 
     local defs = {
         {
-            index = MACRO_START_INDEX,
-            name = "MAD_Sync",
+            name = "Res_Sync",
             note = "resolume-ctrl:sync",
             lines = {
                 string.format('Lua "SetVar(GlobalVars(), \'%s\', 0)"', MONITOR_VAR),
@@ -1776,16 +1805,14 @@ local function ensure_control_macros()
             },
         },
         {
-            index = MACRO_START_INDEX + 1,
-            name = "MAD_PollOn",
+            name = "Res_PollOn",
             note = "resolume-ctrl:monitor",
             lines = {
                 plugin_command("monitor"),
             },
         },
         {
-            index = MACRO_START_INDEX + 2,
-            name = "MAD_PollOff",
+            name = "Res_PollOff",
             note = "resolume-ctrl:stop",
             -- Clear flag immediately (interrupts loop), then plugin stop for UI chrome.
             lines = {
@@ -1794,16 +1821,14 @@ local function ensure_control_macros()
             },
         },
         {
-            index = MACRO_START_INDEX + 3,
-            name = "MAD_Interval",
+            name = "Res_Interval",
             note = "resolume-ctrl:interval",
             lines = {
                 plugin_command("interval"),
             },
         },
         {
-            index = MACRO_START_INDEX + 4,
-            name = "MAD_TrigToggle",
+            name = "Res_TrigToggle",
             note = "resolume-ctrl:trigger",
             lines = {
                 plugin_command("trigtoggle"),
@@ -1812,6 +1837,7 @@ local function ensure_control_macros()
     }
 
     for _, def in ipairs(defs) do
+        def.index = lc.macro_slot(def.name)
         local macro = ensure_macro(def.index)
         if macro == nil then
             Printf("MA3ArenaDeck: could not create Macro %d '%s'", def.index, def.name)
@@ -1845,13 +1871,24 @@ local function ensure_clip_trigger_macros(clips)
         return map
     end
 
-    -- Grow once for the full clip range (fresh shows need Resize before Create).
-    if #clips > 0 then
-        ensure_macro(TRIGGER_MACRO_START + #clips - 1)
+    -- Pick every slot first, then grow the pool once to the highest one
+    -- (fresh shows need Resize before Create).
+    local slots = {}
+    local highest = 0
+    for i, clip in ipairs(clips) do
+        slots[i] = lc.macro_slot(string.format(
+            "Res_Clip_L%dC%d",
+            tonumber(clip.layer) or 1,
+            tonumber(clip.column) or 1
+        ))
+        highest = math.max(highest, slots[i])
+    end
+    if highest > 0 then
+        ensure_macro(highest)
     end
 
     for i, clip in ipairs(clips) do
-        local macro_index = TRIGGER_MACRO_START + (i - 1)
+        local macro_index = slots[i]
         local macro = ensure_macro(macro_index)
         if macro == nil then
             Printf(
@@ -1863,7 +1900,7 @@ local function ensure_clip_trigger_macros(clips)
         else
             local layer = tonumber(clip.layer) or 1
             local column = tonumber(clip.column) or 1
-            local name = string.format("MAD_Fire_L%dC%d", layer, column)
+            local name = string.format("Res_Clip_L%dC%d", layer, column)
             macro:Set("Name", name)
             write_macro_lines(macro, macro_index, {
                 -- Third field = tap time, so the log shows how long the tap waited.
@@ -1879,9 +1916,8 @@ local function ensure_clip_trigger_macros(clips)
     end
 
     Printf(
-        "MA3ArenaDeck: clip trigger macros ready (%d, start=%d)",
-        #clips,
-        TRIGGER_MACRO_START
+        "MA3ArenaDeck: clip trigger macros ready (%d)",
+        #clips
     )
     return map
 end
@@ -1944,12 +1980,12 @@ function lc.action_macro_line(action)
     )
 end
 
---- Macros for layer / composition controls, placed after the clip macros.
+--- Macros for layer / composition controls, each in its own named slot.
 --- Returns a list of { macro_index, action, ... } definitions in build order.
-function lc.ensure_layer_control_macros(grid, first_index)
+function lc.ensure_layer_control_macros(grid)
     local defs = {}
     local function add(def)
-        def.macro_index = first_index + #defs
+        def.macro_index = lc.macro_slot(def.name)
         defs[#defs + 1] = def
     end
     local function fader(scope, kind, name)
@@ -1961,9 +1997,9 @@ function lc.ensure_layer_control_macros(grid, first_index)
         })
     end
 
-    add({ scope = 0, kind = "clear", line = lc.action_macro_line("clearall"), name = "MAD_ClearAll" })
-    add({ scope = 0, kind = "bypass", line = lc.action_macro_line("bypass"), name = "MAD_Bypass" })
-    fader(0, "master", "MAD_GrandMaster")
+    add({ scope = 0, kind = "clear", line = lc.action_macro_line("clearall"), name = "Res_ClearAll" })
+    add({ scope = 0, kind = "bypass", line = lc.action_macro_line("bypass"), name = "Res_Bypass" })
+    fader(0, "master", "Res_GrandMaster")
 
     for _, layer in ipairs(grid.layers or {}) do
         local L = layer.index
@@ -1971,15 +2007,19 @@ function lc.ensure_layer_control_macros(grid, first_index)
             scope = L,
             kind = "clear",
             line = lc.action_macro_line(string.format("clear,%d", L)),
-            name = string.format("MAD_L%d_Clear", L),
+            name = string.format("Res_L%d_Clear", L),
         })
         for _, kind in ipairs({ "master", "audio", "video" }) do
-            fader(L, kind, string.format("MAD_L%d_%s", L, kind:sub(1, 1):upper()))
+            fader(L, kind, string.format("Res_L%d_%s", L, kind:sub(1, 1):upper()))
         end
     end
 
-    if #defs > 0 then
-        ensure_macro(defs[#defs].macro_index)
+    local highest = 0
+    for _, def in ipairs(defs) do
+        highest = math.max(highest, def.macro_index)
+    end
+    if highest > 0 then
+        ensure_macro(highest)
     end
     for _, def in ipairs(defs) do
         local macro = ensure_macro(def.macro_index)
@@ -1992,9 +2032,8 @@ function lc.ensure_layer_control_macros(grid, first_index)
         end
     end
     Printf(
-        "MA3ArenaDeck: layer control macros ready (%d, start=%d)",
-        #defs,
-        first_index
+        "MA3ArenaDeck: layer control macros ready (%d)",
+        #defs
     )
     return defs
 end
@@ -2287,8 +2326,8 @@ local function cleanup_stray_rcs_macro_elements(layout)
         local is_ctrl_button = type(note) == "string" and note:find("^resolume%-ctrl:") ~= nil
         local is_clip = type(note) == "string" and note:find("^resolume%-clip:") ~= nil
         local is_level = type(note) == "string" and note:find("^resolume%-lvl:") ~= nil
-        -- Clip cells may have MAD_Fire_* macros assigned when trigger mode is on;
-        -- layer / composition control cells always carry their MAD_* macro.
+        -- Clip cells may have Res_Clip_* macros assigned when trigger mode is on;
+        -- layer / composition control cells always carry their Res_* macro.
         if not is_ctrl_button and not is_clip and not is_level then
             local obj_name = ""
             pcall(function()
@@ -2303,7 +2342,7 @@ local function cleanup_stray_rcs_macro_elements(layout)
                 end)
             end
 
-            if obj_name:find("^MAD_") ~= nil then
+            if obj_name:find("^Res_") ~= nil or obj_name:find("^MAD_") ~= nil then
                 layout:Delete(i)
                 removed = removed + 1
                 Printf("MA3ArenaDeck: removed stray '%s' from layout", obj_name)
@@ -2895,8 +2934,8 @@ function lc.update_level_display(scope, kind, value)
 end
 
 --- Build the X / B buttons and fader buttons left of the layer labels.
-function lc.add_layer_controls(layout, grid, first_macro_index)
-    local defs = lc.ensure_layer_control_macros(grid, first_macro_index)
+function lc.add_layer_controls(layout, grid)
+    local defs = lc.ensure_layer_control_macros(grid)
     local created = 0
     local layer_count = grid.layer_count or 0
 
@@ -3068,7 +3107,7 @@ local function build_layout(clips, grid, appearance_map)
     end
 
     if lc.SHOW_LAYER_CONTROLS then
-        created = created + lc.add_layer_controls(layout, grid, TRIGGER_MACRO_START + #clips)
+        created = created + lc.add_layer_controls(layout, grid)
     end
 
     created = created + add_control_buttons(layout, layer_count)
@@ -3599,7 +3638,7 @@ function lc.open_fader_dialog(scope, kind)
         overlay:ClearUIChildren()
 
         local base = overlay:Append("BaseInput")
-        base.Name = "MA3ArenaDeckFader"
+        base.Name = "ResArena Fader Control"
         base.W = 260
         base.H = 620
         base.Columns = 1
@@ -3724,7 +3763,10 @@ local function run_full_sync()
         return
     end
 
-    ensure_control_macros()
+    local ctrl = ensure_control_macros() or {}
+    local function ctrl_index(i)
+        return ctrl[i] and ctrl[i].index or 0
+    end
 
     Printf(
         "MA3ArenaDeck: layout ready (%d elements, %d clips, %d layer rows)",
@@ -3734,11 +3776,11 @@ local function run_full_sync()
     )
     Printf(
         "Controls: Macro %d SYNC | %d POLL ON | %d POLL OFF | %d INTERVAL | %d TRIG",
-        MACRO_START_INDEX,
-        MACRO_START_INDEX + 1,
-        MACRO_START_INDEX + 2,
-        MACRO_START_INDEX + 3,
-        MACRO_START_INDEX + 4
+        ctrl_index(1),
+        ctrl_index(2),
+        ctrl_index(3),
+        ctrl_index(4),
+        ctrl_index(5)
     )
     Printf(
         "Trigger mode: %s (tap clips %s)",
@@ -3753,6 +3795,8 @@ end
 
 function Main(display_handle, argument)
     load_config()
+    -- Re-read the Macros pool each run; the user may have changed it.
+    lc.macro_by_name = nil
 
     -- Normalize argument. Pool taps often pass nil; macros pass "sync"/etc.
     -- Some builds pass a non-string; coerce safely.

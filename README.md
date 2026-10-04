@@ -177,7 +177,7 @@ Plugin "MA3ArenaDeck" "monitor"
 
 - Run **SYNC** after you change the Resolume composition (new clips, rearranged deck).
 - Keep **POLL ON** (or **TRIG ON**) while performing if you want live highlights.
-- Pool indexes default from **200** upward — change them in setup if those slots are already used in your show.
+- Image and appearance slots default from **200** upward (change them in setup). Macros have no start slot: each `Res_*` macro reuses the slot with its own name, otherwise the first empty macro slot. Used slots are never overwritten.
 - If sync fails, check System Monitor for HTTP errors, then verify the webserver URL in a browser from the MA3 machine.
 
 ---
