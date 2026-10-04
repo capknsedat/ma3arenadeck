@@ -25,7 +25,7 @@ local signalTable = select(3, ...)
 local myHandle = select(4, ...)
 
 -- Bump when changing runtime behavior so System Monitor proves the reload.
-local PLUGIN_VERSION = "2026-10-04o"
+local PLUGIN_VERSION = "2026-10-04p"
 
 ------------------------------------------------------------------------
 -- Configuration (defaults; overridden by GlobalVars / setup dialog)
@@ -47,7 +47,7 @@ local RESOLUME_PORT = 8080
 local ONLY_WITH_THUMBNAIL = false
 
 local LAYOUT_INDEX = 1
-local LAYOUT_NAME = "MA3ArenaDeck"
+local LAYOUT_NAME = "Resolume Arena"
 
 local CELL_WIDTH = 160
 local CELL_HEIGHT = 90
@@ -64,9 +64,9 @@ local IMAGE_POOL = 3
 local IMAGE_START_INDEX = 200
 local APPEARANCE_START_INDEX = 200
 local MAX_MEDIA_SLOTS = 300
-local IMAGE_NAME_PREFIX = "MAD_"
-local APPEARANCE_IDLE_PREFIX = "MAD_"
-local APPEARANCE_PLAY_PREFIX = "MADP_"
+local IMAGE_NAME_PREFIX = "RA_"
+local APPEARANCE_IDLE_PREFIX = "RA_"
+local APPEARANCE_PLAY_PREFIX = "RA_Play_"
 
 -- Status polling
 local POLL_INTERVAL_SEC = 0.25
@@ -240,6 +240,10 @@ local function load_config()
     LAYOUT_INDEX = tonumber(cfg_get("LayoutIndex", LAYOUT_INDEX)) or LAYOUT_INDEX
     lc.layout_pref = LAYOUT_INDEX
     LAYOUT_NAME = tostring(cfg_get("LayoutName", LAYOUT_NAME))
+    if LAYOUT_NAME == "MA3ArenaDeck" then
+        -- Old default name: the layout is renamed to the new default on SYNC.
+        LAYOUT_NAME = "Resolume Arena"
+    end
     IMAGE_START_INDEX = tonumber(cfg_get("ImageStart", IMAGE_START_INDEX)) or IMAGE_START_INDEX
     APPEARANCE_START_INDEX = tonumber(cfg_get("AppearanceStart", APPEARANCE_START_INDEX))
         or APPEARANCE_START_INDEX
@@ -1095,14 +1099,44 @@ local function ensure_macro(index)
     return nil
 end
 
-local function find_pool_index_by_name(pool, name, start_index, max_slots)
-    for i = start_index, start_index + max_slots - 1 do
-        local obj = pool[i]
-        if pool_object_valid(obj) and object_name(obj) == name then
-            return i
-        end
+--- Name the same object had up to v2026-10-04o (MAD_ / MADP_ / MAD_Fire_,
+--- layout "MA3ArenaDeck"). An object still carrying it is ours: its slot
+--- is reused and renamed instead of filling a new slot. Nothing is deleted.
+function lc.old_name(name)
+    if name == LAYOUT_NAME then
+        return "MA3ArenaDeck"
+    end
+    local rest = name:match("^RA_Play_(.*)$")
+    if rest then
+        return "MADP_" .. rest
+    end
+    rest = name:match("^RA_Clip_(.*)$")
+    if rest then
+        return "MAD_Fire_" .. rest
+    end
+    rest = name:match("^RA_(.*)$")
+    if rest then
+        return "MAD_" .. rest
     end
     return nil
+end
+
+local function find_pool_index_by_name(pool, name, start_index, max_slots)
+    local old = lc.old_name(name)
+    local old_index = nil
+    for i = start_index, start_index + max_slots - 1 do
+        local obj = pool[i]
+        if pool_object_valid(obj) then
+            local n = object_name(obj)
+            if n == name then
+                return i
+            end
+            if old_index == nil and old ~= nil and n == old then
+                old_index = i
+            end
+        end
+    end
+    return old_index
 end
 
 local function find_free_pool_index(pool, start_index, max_slots)
@@ -1167,6 +1201,13 @@ function lc.macro_allocator()
         if idx and object_name(lc.pool_get(macros, idx)) == name then
             return idx
         end
+        local old = lc.old_name(name)
+        idx = old and by_name[old]
+        if idx and object_name(lc.pool_get(macros, idx)) == old then
+            by_name[old] = nil
+            by_name[name] = idx
+            return idx
+        end
         while next_free <= #free do
             local i = free[next_free]
             next_free = next_free + 1
@@ -1186,8 +1227,10 @@ function lc.resolve_layout_index(create)
     if layouts == nil then
         return nil
     end
+    local old = lc.old_name(LAYOUT_NAME)
     local function ours(i)
-        return object_name(lc.pool_get(layouts, i)) == LAYOUT_NAME
+        local n = object_name(lc.pool_get(layouts, i))
+        return n ~= nil and (n == LAYOUT_NAME or n == old)
     end
     local pref = lc.layout_pref or LAYOUT_INDEX
     local found = nil
@@ -1869,7 +1912,7 @@ local function ensure_control_macros()
 
     local defs = {
         {
-            name = "MAD_Sync",
+            name = "RA_Sync",
             note = "resolume-ctrl:sync",
             lines = {
                 string.format('Lua "SetVar(GlobalVars(), \'%s\', 0)"', MONITOR_VAR),
@@ -1878,14 +1921,14 @@ local function ensure_control_macros()
             },
         },
         {
-            name = "MAD_PollOn",
+            name = "RA_PollOn",
             note = "resolume-ctrl:monitor",
             lines = {
                 plugin_command("monitor"),
             },
         },
         {
-            name = "MAD_PollOff",
+            name = "RA_PollOff",
             note = "resolume-ctrl:stop",
             -- Clear flag immediately (interrupts loop), then plugin stop for UI chrome.
             lines = {
@@ -1894,14 +1937,14 @@ local function ensure_control_macros()
             },
         },
         {
-            name = "MAD_Interval",
+            name = "RA_Interval",
             note = "resolume-ctrl:interval",
             lines = {
                 plugin_command("interval"),
             },
         },
         {
-            name = "MAD_TrigToggle",
+            name = "RA_TrigToggle",
             note = "resolume-ctrl:trigger",
             lines = {
                 plugin_command("trigtoggle"),
@@ -1949,7 +1992,7 @@ local function ensure_clip_trigger_macros(clips)
     for _, clip in ipairs(clips) do
         local layer = tonumber(clip.layer) or 1
         local column = tonumber(clip.column) or 1
-        local name = string.format("MAD_Fire_L%dC%d", layer, column)
+        local name = string.format("RA_Clip_L%dC%d", layer, column)
         local macro_index = alloc(name)
         local macro = macro_index and ensure_macro(macro_index)
         if macro == nil then
@@ -2054,9 +2097,9 @@ function lc.ensure_layer_control_macros(grid)
         })
     end
 
-    add({ scope = 0, kind = "clear", line = lc.action_macro_line("clearall"), name = "MAD_ClearAll" })
-    add({ scope = 0, kind = "bypass", line = lc.action_macro_line("bypass"), name = "MAD_Bypass" })
-    fader(0, "master", "MAD_GrandMaster")
+    add({ scope = 0, kind = "clear", line = lc.action_macro_line("clearall"), name = "RA_ClearAll" })
+    add({ scope = 0, kind = "bypass", line = lc.action_macro_line("bypass"), name = "RA_Bypass" })
+    fader(0, "master", "RA_GrandMaster")
 
     for _, layer in ipairs(grid.layers or {}) do
         local L = layer.index
@@ -2064,10 +2107,10 @@ function lc.ensure_layer_control_macros(grid)
             scope = L,
             kind = "clear",
             line = lc.action_macro_line(string.format("clear,%d", L)),
-            name = string.format("MAD_L%d_Clear", L),
+            name = string.format("RA_L%d_Clear", L),
         })
         for _, kind in ipairs({ "master", "audio", "video" }) do
-            fader(L, kind, string.format("MAD_L%d_%s", L, kind:sub(1, 1):upper()))
+            fader(L, kind, string.format("RA_L%d_%s", L, kind:sub(1, 1):upper()))
         end
     end
 
@@ -2382,8 +2425,8 @@ local function cleanup_stray_rcs_macro_elements(layout)
         local is_ctrl_button = type(note) == "string" and note:find("^resolume%-ctrl:") ~= nil
         local is_clip = type(note) == "string" and note:find("^resolume%-clip:") ~= nil
         local is_level = type(note) == "string" and note:find("^resolume%-lvl:") ~= nil
-        -- Clip cells may have MAD_Fire_* macros assigned when trigger mode is on;
-        -- layer / composition control cells always carry their MAD_* macro.
+        -- Clip cells may have RA_Clip_* macros assigned when trigger mode is on;
+        -- layer / composition control cells always carry their RA_* macro.
         if not is_ctrl_button and not is_clip and not is_level then
             local obj_name = ""
             pcall(function()
@@ -2398,7 +2441,7 @@ local function cleanup_stray_rcs_macro_elements(layout)
                 end)
             end
 
-            if obj_name:find("^MAD_") ~= nil then
+            if obj_name:find("^RA_") ~= nil or obj_name:find("^MAD_") ~= nil then
                 layout:Delete(i)
                 removed = removed + 1
                 Printf("MA3ArenaDeck: removed stray '%s' from layout", obj_name)

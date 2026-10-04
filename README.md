@@ -96,7 +96,7 @@ If both run on the **same computer**, change Resolume’s listen port (for examp
 1. Enable the Resolume webserver (see above) and load a composition with clips.
 2. Tap the **MA3ArenaDeck** plugin in the Plugin pool → setup dialog opens.
 3. Set **Host** / **Port** (and layout / pool starts if you need non-defaults) → **Sync**.
-4. Open **Layout** *MA3ArenaDeck* (Layout 1 if that slot is free, otherwise the next free layout).
+4. Open **Layout** *Resolume Arena* (the Layout Index from setup if that slot is free or already ours, otherwise the next free layout). Generated objects are named `RA_…` (macros `RA_Sync`, `RA_Clip_L1C1`, …; images/appearances `RA_<clipID>` and `RA_Play_<clipID>`). Objects from older versions (`MAD_…`, layout *MA3ArenaDeck*) are renamed in place on SYNC, not duplicated.
 5. Tap **POLL ON** to follow playing clips, or **TRIG ON** to also fire clips from the layout (poll starts automatically with trigger).
 
 ---
