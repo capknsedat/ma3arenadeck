@@ -14,7 +14,7 @@ Ideal for busking, hybrid lighting + video shows, and keeping the media operator
 
 - Builds a **layout grid** that matches your Resolume layers and columns (layer 1 at the bottom, like Resolume)
 - Imports **clip thumbnails** into Images / Appearances
-- **POLL** mode highlights the currently connected (playing) clips in cyan
+- **POLL** mode highlights the currently connected (playing) clips in red
 - **TRIG** mode lets you tap a clip on the layout to fire it in Resolume via the REST API
 - On-layout controls: **SYNC**, **POLL ON / OFF**, **poll interval**, **TRIG ON / OFF**
 - Setup dialog for host, port, layout slot, and pool indexes (values are remembered)
@@ -106,12 +106,29 @@ If both run on the **same computer**, change Resolume’s listen port (for examp
 | Button | Action |
 | --- | --- |
 | **SYNC** | Stops polling, re-fetches the composition, rebuilds the layout and media |
-| **POLL ON** | Starts status polling; playing clips get a cyan frame |
+| **POLL ON** | Starts status polling; playing clips get a red frame |
 | **POLL OFF** | Stops polling |
 | **POLL x.xxs** | Cycles poll interval (`0.10` → `0.25` → `0.50` → `1.00` → `2.00` s) |
 | **TRIG ON / OFF** | When **ON**, tapping a clip cell triggers that clip in Resolume; poll is started so highlights stay in sync |
 
-Playing clips: thicker **cyan** border (and optional name prefix `>`). Idle clips: white border.
+### Layer & composition controls
+
+Left of the layer labels, every layer row gets:
+
+| Control | Action in Resolume |
+| --- | --- |
+| **X** | Clear the layer (same as the layer's X) |
+| **M** | Layer master |
+| **A** | Layer audio volume |
+| **V** | Layer video opacity |
+
+Above the top layer, the **COMPOSITION** row has **X ALL** (disconnect all clips), **B** (composition bypass / blackout, toggles) and **GM** (grand master).
+
+**M / A / V / GM** show the current level. Tapping one opens a fader popup; drag it and Resolume follows (the newest position is sent on each poll step). The popup takes over only once it reaches the current level (shown as `A 20% -> 50%` until then), so grabbing it never makes the sound or picture jump. Changes made directly in Resolume are not read back until the next **SYNC**.
+
+Playing clips: thicker **red** border (and optional name prefix `>`). Idle clips: black border.
+
+With **TRIG ON**, a tapped clip is sent to Resolume within a few tens of milliseconds (taps are checked between every poll request and while waiting for the next poll) and turns red immediately; the next poll confirms the state. Run **SYNC** once after updating so the playing-clip appearances get the new tint.
 
 ---
 
@@ -175,6 +192,8 @@ Plugin "MA3ArenaDeck" "monitor"
 | Plugin changes not loading | `Installed = Yes`, external `.lua`, then `ReloadAllPlugins` |
 | Layout buttons missing / wrong | Run **SYNC** once after install or after changing macro start index |
 | Tap does nothing | **TRIG ON**; then **SYNC** once so clip fire macros are rebuilt |
+| Tap is slow | System Monitor shows `triggered Lx Cy (tap waited …s, POST …s)` and `poll #n … fetch=…s`; a large *tap waited* means the poll was blocked, a large *POST* means Resolume itself answered slowly |
+| Frame colours do not change | System Monitor prints `border colour via …` or `border colour not confirmed …` after SYNC; clip appearances also get a black background |
 
 ---
 
