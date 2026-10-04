@@ -25,7 +25,7 @@ local signalTable = select(3, ...)
 local myHandle = select(4, ...)
 
 -- Bump when changing runtime behavior so System Monitor proves the reload.
-local PLUGIN_VERSION = "2026-10-04d"
+local PLUGIN_VERSION = "2026-10-04e"
 
 ------------------------------------------------------------------------
 -- Configuration (defaults; overridden by GlobalVars / setup dialog)
@@ -2084,10 +2084,41 @@ local function label_pos(layer_index, _layer_count)
     return x, y
 end
 
+--- Layout elements that carry a Macro draw that macro's pool icon (the
+--- paper-scroll symbol) on top of the element. Give the macro itself the
+--- same appearance so the button shows its colour instead.
+function lc.assign_object_appearance(element, appearance_info)
+    local obj = nil
+    pcall(function()
+        obj = element.Object
+    end)
+    if obj == nil or type(obj) == "string" then
+        return
+    end
+    local ok = pcall(function()
+        obj.Appearance = appearance_info.handle
+    end)
+    if not ok then
+        ok = pcall(function()
+            obj:Set("Appearance", appearance_info.handle:AddrNative())
+        end)
+    end
+    if not ok then
+        pcall(function()
+            Cmd(string.format(
+                "Assign Appearance %d At Macro %d",
+                appearance_info.index,
+                obj:Index()
+            ))
+        end)
+    end
+end
+
 local function assign_appearance(element, appearance_info)
     if element == nil or appearance_info == nil or appearance_info.handle == nil then
         return false
     end
+    lc.assign_object_appearance(element, appearance_info)
 
     local ok = pcall(function()
         element.Appearance = appearance_info.handle:AddrNative()
