@@ -1,10 +1,12 @@
-# Resolume Arena Web Server
+# ResArena Control for MA3
 
 *Based on **MA3ArenaDeck** by Simon Kotting (MIT License).*
 
+*Works with Resolume Arena / Avenue. Resolume, Arena and Avenue are trademarks of Resolume; grandMA3 is a trademark of MA Lighting. This project is not affiliated with or endorsed by either company.*
+
 **Resolume composition grid for grandMA3**
 
-Resolume Arena Web Server mirrors your Resolume Arena / Avenue clip deck on a grandMA3 layout: thumbnails, live “what’s playing” highlights, and optional tap-to-trigger control from the console.
+ResArena Control for MA3 mirrors your Resolume Arena / Avenue clip deck on a grandMA3 layout: thumbnails, live “what’s playing” highlights, and optional tap-to-trigger control from the console.
 
 Ideal for busking, hybrid lighting + video shows, and keeping the media operator’s deck visible (and optionally playable) on the lighting surface.
 
@@ -37,7 +39,7 @@ Lua HTTP modules shipped with grandMA3 (`http`, `ltn12`, `json`) are used; no ex
 
 ## Network & Resolume webserver (important)
 
-Resolume Arena Web Server talks to Resolume over **HTTP**. The grandMA3 system must be able to open a TCP connection to Resolume’s webserver address and port.
+ResArena Control for MA3 talks to Resolume over **HTTP**. The grandMA3 system must be able to open a TCP connection to Resolume’s webserver address and port.
 
 1. On the Resolume machine: **Preferences → Webserver**
 2. Enable **Webserver & REST API**
@@ -52,11 +54,11 @@ Official Resolume documentation:
 
 Resolume’s default webserver port is often **8080**. grandMA3 also commonly uses **8080**.
 
-If both run on the **same computer**, change Resolume’s listen port (for example to **8090**) and enter that port in Resolume Arena Web Server’s setup dialog. The plugin default is Resolume’s usual `127.0.0.1:8080` — only change it when 8080 is already taken (e.g. by grandMA3).
+If both run on the **same computer**, change Resolume’s listen port (for example to **8090**) and enter that port in ResArena Control for MA3’s setup dialog. The plugin default is Resolume’s usual `127.0.0.1:8080` — only change it when 8080 is already taken (e.g. by grandMA3).
 
 ### Different machines
 
-- Put Resolume’s **LAN IP** in Resolume Arena Web Server (not only `127.0.0.1` — that always means “this machine”)
+- Put Resolume’s **LAN IP** in ResArena Control for MA3 (not only `127.0.0.1` — that always means “this machine”)
 - Allow the port through the OS firewall on the Resolume PC
 - Both machines must be on a network that can route to each other (same subnet is simplest)
 
@@ -66,24 +68,24 @@ If both run on the **same computer**, change Resolume’s listen port (for examp
 
 1. Copy this folder into your grandMA3 plugins library as:
 
-   `…/gma3_library/datapools/plugins/ResolumeArenaWebServer/`
+   `…/gma3_library/datapools/plugins/ResArenaControl/`
 
 2. Files expected:
 
    | File | Role |
    | --- | --- |
-   | `ResolumeArenaWebServer.xml` | Plugin definition (import this) |
-   | `ResolumeArenaWebServer.lua` | Plugin code |
+   | `ResArenaControl.xml` | Plugin definition (import this) |
+   | `ResArenaControl.lua` | Plugin code |
    | `LICENSE` | MIT license |
    | `README.md` | This document |
 
-3. In grandMA3: **Import** `ResolumeArenaWebServer.xml` into the **Plugin** pool.
+3. In grandMA3: **Import** `ResArenaControl.xml` into the **Plugin** pool.
 
 4. On the ComponentLua object, set:
 
    - **Installed** = **Yes**
-   - **FileName** = `ResolumeArenaWebServer.lua`
-   - **Path** = `ResolumeArenaWebServer` (must match the folder name under `datapools/plugins`)
+   - **FileName** = `ResArenaControl.lua`
+   - **Path** = `ResArenaControl` (must match the folder name under `datapools/plugins`)
 
 5. Keep the plugin **external** (`Installed = Yes`). Pasting the full Lua into the showfile editor can hit a size limit and will not update from disk.
 
@@ -96,7 +98,7 @@ If both run on the **same computer**, change Resolume’s listen port (for examp
 ## Quick start
 
 1. Enable the Resolume webserver (see above) and load a composition with clips.
-2. Tap the **Resolume Arena Web Server** plugin in the Plugin pool → choose **Install** → setup dialog opens.
+2. Tap the **ResArena Control for MA3** plugin in the Plugin pool → choose **Install** → setup dialog opens.
 3. Set **Host** / **Port** (and layout / pool starts if you need non-defaults) → **Sync**.
 4. Open **Layout** (default: Layout 1, labelled *ResArena*).
 5. Tap **POLL ON** to follow playing clips, or **TRIG ON** to also fire clips from the layout (poll starts automatically with trigger).
@@ -172,8 +174,8 @@ Useful if you call the plugin from your own macros:
 Example:
 
 ```text
-Plugin "Resolume Arena Web Server" "sync"
-Plugin "Resolume Arena Web Server" "monitor"
+Plugin "ResArena Control for MA3" "sync"
+Plugin "ResArena Control for MA3" "monitor"
 ```
 
 ---
@@ -193,7 +195,7 @@ Plugin "Resolume Arena Web Server" "monitor"
 | --- | --- |
 | Setup / sync cannot reach Resolume | Webserver enabled; host/port; firewall; browser test from the MA3 PC |
 | Works on Resolume PC but not from console | Use LAN IP, not `127.0.0.1`; same network / routing |
-| Port already in use / odd HTTP failures on one machine | Change Resolume off **8080** (MA conflict); set the new port in Resolume Arena Web Server |
+| Port already in use / odd HTTP failures on one machine | Change Resolume off **8080** (MA conflict); set the new port in ResArena Control for MA3 |
 | Plugin changes not loading | `Installed = Yes`, external `.lua`, then `ReloadAllPlugins` |
 | Layout buttons missing / wrong | Run **SYNC** once after install or after changing macro start index |
 | Tap does nothing | **TRIG ON**; then **SYNC** once so clip fire macros are rebuilt |
@@ -204,7 +206,7 @@ Plugin "Resolume Arena Web Server" "monitor"
 
 ## Privacy & safety
 
-- Resolume Arena Web Server only contacts the Resolume host/port you configure.
+- ResArena Control for MA3 only contacts the Resolume host/port you configure.
 - Trigger mode sends clip **connect** commands to Resolume — disable **TRIG** for monitor-only operation.
 - Generated Images, Appearances, Macros, and Layout content live in your showfile / pools; review pool start indexes before large shows.
 

@@ -1,4 +1,4 @@
--- Plugin: Resolume Arena Web Server (Resolume composition grid for grandMA3)
+-- Plugin: ResArena Control for MA3 (Resolume composition grid for grandMA3)
 -- Based on MA3ArenaDeck, Copyright (c) 2026 Simon Kotting — MIT License (see LICENSE)
 -- Fetches the current Resolume composition, builds a layout grid, imports
 -- clip thumbnails as Images/Appearances, and can poll connected state to
@@ -25,7 +25,7 @@ local signalTable = select(3, ...)
 local myHandle = select(4, ...)
 
 -- Bump when changing runtime behavior so System Monitor proves the reload.
-local PLUGIN_VERSION = "2026-10-04k"
+local PLUGIN_VERSION = "2026-10-04l"
 
 ------------------------------------------------------------------------
 -- Configuration (defaults; overridden by GlobalVars / setup dialog)
@@ -300,7 +300,7 @@ local function show_setup_dialog(display_handle)
     Printf("ResArena: opening setup dialog...")
 
     local options = {
-        title = "Resolume Arena Web Server Setup",
+        title = "ResArena Control for MA3 Setup",
         message = "Set Resolume host/port and MA3 pool slots, then Sync.\n\n"
             .. "Note: Resolume's default webserver port is 8080, which grandMA3 "
             .. "also uses by default. If both run on the same machine, change "
@@ -362,7 +362,7 @@ local function show_setup_dialog(display_handle)
         Printf("ResArena: MessageBox failed: %s", tostring(result))
         -- Retry with a minimal dialog (some builds dislike states/inputs combo).
         ok, result = pcall(MessageBox, {
-            title = "Resolume Arena Web Server Setup",
+            title = "ResArena Control for MA3 Setup",
             message = string.format(
                 "Host=%s  Port=%d  Layout=%d\nEdit values in code/GlobalVars if this dialog is limited.\n\nContinue with Sync?",
                 RESOLUME_HOST,
@@ -3764,7 +3764,7 @@ end
 --- Returns "install" | "uninstall" | "cancel".
 function lc.show_start_dialog(display_handle)
     local options = {
-        title = "Resolume Arena Web Server",
+        title = "ResArena Control for MA3",
         message = "Install: set up Resolume connection and build the layout.\n"
             .. "Uninstall: remove the layout, macros, appearances and images\n"
             .. "this plugin created, and its saved settings.",
@@ -3790,7 +3790,7 @@ end
 
 function lc.confirm_uninstall(display_handle)
     local options = {
-        title = "Resolume Arena Web Server - Uninstall",
+        title = "ResArena Control for MA3 - Uninstall",
         message = string.format(
             "Delete Layout %d '%s', all Res_ (and old MAD_) macros, appearances and images\n"
                 .. "(from slot %d / %d / %d) and the plugin settings?",

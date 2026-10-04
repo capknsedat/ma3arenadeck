@@ -4,12 +4,12 @@
       External plugin (not embedded in the showfile).
 
       Install folder (recommended):
-        gma3_library/datapools/plugins/ResolumeArenaWebServer/
+        gma3_library/datapools/plugins/ResArenaControl/
 
       Import this XML, then verify on the ComponentLua:
         - Installed = Yes
-        - FileName  = ResolumeArenaWebServer.lua
-        - Path      = ResolumeArenaWebServer   (must match the folder name)
+        - FileName  = ResArenaControl.lua
+        - Path      = ResArenaControl   (must match the folder name)
 
       After editing the .lua on disk:
         ReloadAllPlugins
@@ -19,7 +19,7 @@
       That path has a size limit and ReloadAllPlugins will NOT pick up
       disk edits. Keep Installed=Yes / external file.
     -->
-    <UserPlugin Name="Resolume Arena Web Server" Version="0.2.0.0" Author="Sedat (based on MA3ArenaDeck by Simon Kotting)" Path="ResolumeArenaWebServer">
-        <ComponentLua Name="ResolumeArenaWebServer" FileName="ResolumeArenaWebServer.lua"/>
+    <UserPlugin Name="ResArena Control for MA3" Version="0.2.0.0" Author="Sedat (based on MA3ArenaDeck by Simon Kotting)" Path="ResArenaControl">
+        <ComponentLua Name="ResArenaControl" FileName="ResArenaControl.lua"/>
     </UserPlugin>
 </GMA3>
