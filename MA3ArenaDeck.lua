@@ -25,7 +25,7 @@ local signalTable = select(3, ...)
 local myHandle = select(4, ...)
 
 -- Bump when changing runtime behavior so System Monitor proves the reload.
-local PLUGIN_VERSION = "2026-10-04g"
+local PLUGIN_VERSION = "2026-10-04h"
 
 ------------------------------------------------------------------------
 -- Configuration (defaults; overridden by GlobalVars / setup dialog)
@@ -114,7 +114,7 @@ lc.SCAN_PER_TICK = 2
 --   [X] [B] [GM]      (composition row above the top layer)
 -- M / A / V / GM show the level; tapping one opens a fader popup.
 lc.SHOW_LAYER_CONTROLS = true
-lc.FADER_BTN_WIDTH = 110
+lc.FADER_BTN_WIDTH = 60
 lc.FADER_GAP = 14
 lc.CTRL_BTN_WIDTH = 60
 lc.LEVEL_COLOR = {
@@ -2128,58 +2128,84 @@ end
 --- Set "no appearance" on a layout element and on the Macro it carries.
 --- With an appearance (even a plain colour) MA3 draws the macro's paper
 --- icon; with none the button is just its border and centred text.
-function lc.clear_object_appearance(obj, cmd_target)
-    if obj == nil then
-        return
-    end
-    local function empty()
-        local v = nil
-        pcall(function()
-            v = obj.Appearance
-        end)
-        return v == nil or v == "" or tostring(v) == "" or tostring(v) == "None"
-    end
-    if empty() then
-        return
-    end
-    pcall(function()
-        obj.Appearance = nil
-    end)
-    if not empty() then
-        pcall(function()
-            obj:Set("Appearance", "")
-        end)
-    end
-    if not empty() and cmd_target then
-        pcall(function()
-            Cmd(string.format('Set %s Property "Appearance" ""', cmd_target))
-        end)
-    end
-end
-
+--- Set the layout element's appearance to None (as picked in the element
+--- editor). The Macro objects themselves are left untouched.
 function lc.clear_appearance(element)
     if element == nil then
         return
     end
+    for _, value in ipairs({ "None", "" }) do
+        pcall(function()
+            element:Set("Appearance", value)
+        end)
+    end
+    pcall(function()
+        element.Appearance = nil
+    end)
     local idx = nil
     pcall(function()
         idx = element:Index()
     end)
-    lc.clear_object_appearance(
-        element,
-        idx and string.format("Layout %d.%d", LAYOUT_INDEX, idx) or nil
-    )
-    local obj = nil
-    pcall(function()
-        obj = element.Object
-    end)
-    if obj ~= nil and type(obj) ~= "string" then
-        local midx = nil
+    if idx then
         pcall(function()
-            midx = obj:Index()
+            Cmd(string.format('Set Layout %d.%d Property "Appearance" "None"', LAYOUT_INDEX, idx))
         end)
-        lc.clear_object_appearance(obj, midx and string.format("Macro %d", midx) or nil)
     end
+end
+
+--- Keep the label inside the button, centred both ways (also after the
+--- Macro is assigned, which may reset text placement).
+function lc.center_text(element)
+    local idx = nil
+    pcall(function()
+        idx = element:Index()
+    end)
+    for _, pair in ipairs({
+        { "customtextalignmenth", "Center" },
+        { "customtextalignmentv", "Center" },
+        { "CustomTextAlignmentH", "Center" },
+        { "CustomTextAlignmentV", "Center" },
+        { "visibilityobjectname", "Hidden" },
+    }) do
+        pcall(function()
+            element:Set(pair[1], pair[2])
+        end)
+    end
+    if idx then
+        pcall(function()
+            Cmd(string.format(
+                'Set Layout %d.%d Property "CustomTextAlignmentV" "Center"',
+                LAYOUT_INDEX,
+                idx
+            ))
+        end)
+    end
+end
+
+--- One-time System Monitor dump of a control element's text / appearance
+--- properties, so the exact property names on this MA3 build are visible.
+function lc.dump_element_props(element)
+    if lc.props_dumped or element == nil then
+        return
+    end
+    lc.props_dumped = true
+    local count = 0
+    pcall(function()
+        count = element:PropertyCount()
+    end)
+    local parts = {}
+    for i = 0, count - 1 do
+        pcall(function()
+            local name = element:PropertyName(i)
+            local lname = tostring(name):lower()
+            if lname:find("text") or lname:find("align") or lname:find("appear")
+                or lname:find("visib") or lname:find("label")
+            then
+                parts[#parts + 1] = string.format("%s=%s", tostring(name), tostring(element:Get(name)))
+            end
+        end)
+    end
+    Printf("MA3ArenaDeck: element props: %s", table.concat(parts, " | "))
 end
 
 local function assign_appearance(element, appearance_info)
@@ -2484,6 +2510,7 @@ local function place_control_macro(layout, macro_index, geo)
         style_element(target, geo)
     end
     set_element_action_go(target)
+    lc.center_text(target)
     pcall(function()
         target:Set("visibilityobjectname", "Hidden")
     end)
@@ -2902,7 +2929,7 @@ function lc.add_layer_controls(layout, grid, first_macro_index)
             local opts = {
                 y = row_y(def.scope),
                 height = CELL_HEIGHT,
-                text_size = 22,
+                text_size = 16,
                 border = 4,
                 note = lc.level_note(def.scope, def.kind, 0),
             }
@@ -2910,6 +2937,7 @@ function lc.add_layer_controls(layout, grid, first_macro_index)
                 opts.x = x0
                 opts.width = lc.CTRL_BTN_WIDTH
                 opts.text = def.scope == 0 and "X ALL" or "X"
+                opts.text_size = def.scope == 0 and 14 or 24
             else
                 local slot = slots[def.kind] or 0
                 if def.scope == 0 and def.kind == "master" then
@@ -2924,6 +2952,8 @@ function lc.add_layer_controls(layout, grid, first_macro_index)
             local el = add_element(layout, opts)
             if el then
                 assign_clip_trigger_macro(el, def.macro_index)
+                lc.center_text(el)
+                lc.dump_element_props(el)
                 if def.kind == "clear" then
                     local c = lc.LEVEL_COLOR.clear
                     lc.clear_appearance(el)
@@ -3209,7 +3239,6 @@ end
 --- Fire a queued layout tap (if any) and show it immediately, then run any
 --- queued layer / composition controls. Returns true when something ran.
 local function handle_pending_fire()
-    lc.poll_bound_fader()
     local acted = lc.process_pending_actions()
     local layer, column = process_pending_fire()
     if not layer then
@@ -3516,81 +3545,11 @@ function lc.fader_title(scope, kind)
     return string.format("Layer %d %s", scope, names[kind] or kind)
 end
 
---- The popup fader is bound to a spare Playback Master (default 50), the
---- way MA documents UiFader targets: we preset that master to the current
---- level so the fader opens there, and the poll loop forwards its moves.
---- A playback master only dims sequences explicitly assigned to it.
-function lc.fader_master()
-    local index = tonumber(cfg_get("FaderMaster", 50)) or 50
-    local master = nil
-    pcall(function()
-        master = ShowData().Masters.Playback[index]
-    end)
-    return master, index
-end
-
-function lc.read_master(master)
-    local v = nil
-    pcall(function()
-        v = master.NormedValue
-    end)
-    if v == nil then
-        pcall(function()
-            v = master:Get("NormedValue")
-        end)
-    end
-    return tonumber(tostring(v or ""):match("%-?[%d%.]+"))
-end
-
---- Preset the master; returns the scale (100 = percent, 1 = 0..1) or nil.
-function lc.preset_master(master, frac)
-    local pct = math.floor(frac * 100 + 0.5)
-    pcall(function()
-        master.NormedValue = tostring(pct)
-    end)
-    local rb = lc.read_master(master)
-    if rb and math.abs(rb - pct) < 0.6 and pct > 1 then
-        return 100
-    end
-    pcall(function()
-        master.NormedValue = frac
-    end)
-    rb = lc.read_master(master)
-    if rb and math.abs(rb - frac) < 0.006 then
-        return 1
-    end
-    if rb and math.abs(rb - pct) < 0.6 then
-        return 100
-    end
-    return nil
-end
-
---- Called from the poll loop: forward the bound fader's position.
-function lc.poll_bound_fader()
-    local b = lc.bound
-    if b == nil then
-        return false
-    end
-    local v = lc.read_master(b.master)
-    if v == nil then
-        return false
-    end
-    local frac = v / b.scale
-    if math.abs(frac - b.last) < 0.002 then
-        return false
-    end
-    b.last = frac
-    lc.queue_level(b.scope, b.kind, frac)
-    return true
-end
-
 --- Pop up a draggable fader for one layer / composition level.
 --- Returns true when the on-screen dialog was built.
 function lc.open_fader_dialog(scope, kind)
     local current = lc.get_level(scope, kind)
 
-    local picked_up = false
-    local last_frac = nil
     local signals = signalTable or {}
     signals.MADFaderChanged = function(caller)
         local value = nil
@@ -3603,32 +3562,9 @@ function lc.open_fader_dialog(scope, kind)
             end)
         end
         local frac = lc.parse_fader_value(value)
-        if not frac then
-            return
+        if frac then
+            lc.queue_level(scope, kind, frac)
         end
-        -- Pick-up: the popup fader may open at 0 instead of the current
-        -- level. Send nothing until it reaches / crosses the current level,
-        -- so grabbing it never makes the picture or sound jump.
-        if not picked_up then
-            local near = math.abs(frac - current) <= 0.03
-            local crossed = last_frac ~= nil and (last_frac - current) * (frac - current) <= 0
-            last_frac = frac
-            if not (near or crossed) then
-                pcall(function()
-                    caller.Text = string.format(
-                        "%s -> %d%%",
-                        lc.fader_label(scope, kind, frac),
-                        math.floor(current * 100 + 0.5)
-                    )
-                end)
-                return
-            end
-            picked_up = true
-        end
-        pcall(function()
-            caller.Text = lc.fader_label(scope, kind, frac)
-        end)
-        lc.queue_level(scope, kind, frac)
     end
 
     local ok, err = pcall(function()
@@ -3675,67 +3611,16 @@ function lc.open_fader_dialog(scope, kind)
         local fader = frame:Append("UiFader")
         fader.Anchors = "0,0"
         fader.Text = lc.fader_label(scope, kind, current)
-
-        -- Bind to the spare playback master preset to the current level.
-        lc.bound = nil
-        local master, master_index = lc.fader_master()
-        local scale = master and lc.preset_master(master, current) or nil
-        if master and scale then
-            fader.Target = master
-            fader.Property = "NormedValue"
-            lc.bound = {
-                master = master,
-                scale = scale,
-                scope = scope,
-                kind = kind,
-                last = current,
-            }
-            picked_up = true
-            Printf(
-                "MA3ArenaDeck: fader bound to Playback Master %d (scale %d)",
-                master_index,
-                scale
-            )
-        else
-            Printf("MA3ArenaDeck: fader not bound (Playback Master %d unavailable)", master_index)
-            fader.PluginComponent = myHandle
-            fader.Changed = "MADFaderChanged"
-        end
+        fader.PluginComponent = myHandle
+        fader.Changed = "MADFaderChanged"
         pcall(function()
             local c = lc.LEVEL_COLOR[kind] or lc.LEVEL_COLOR.master
             fader.Color = string.format("%.3f,%.3f,%.3f,1", c.r / 255, c.g / 255, c.b / 255)
         end)
-        -- Start at the current level where the build allows setting it
-        -- (UiFader.Value is read-only on some versions; pick-up covers that).
-        local pct = math.floor(current * 100 + 0.5)
-        local set_ok = lc.bound ~= nil or pcall(function()
-            fader.Value = pct
-        end)
-        if not set_ok then
-            set_ok = pcall(function()
-                fader:Set("Value", tostring(pct))
-            end)
-        end
-        if not set_ok then
-            pcall(function()
-                fader.Value = string.format("%d%%", pct)
-            end)
-        end
-        local start = nil
+        -- Start at the current level where the build allows setting it.
         pcall(function()
-            start = lc.parse_fader_value(fader.Value)
+            fader.Value = string.format("%d%%", math.floor(current * 100 + 0.5))
         end)
-        if lc.bound ~= nil then
-            picked_up = true
-        elseif start and math.abs(start - current) <= 0.03 then
-            picked_up = true
-        else
-            fader.Text = string.format(
-                "%s (%d%%)",
-                lc.fader_title(scope, kind),
-                pct
-            )
-        end
     end)
 
     if ok then
