@@ -118,13 +118,13 @@ Left of the layer labels, every layer row gets:
 | Control | Action in Resolume |
 | --- | --- |
 | **X** | Clear the layer (same as the layer's X) |
-| **M** fader | Layer master |
-| **A** fader | Layer audio volume |
-| **V** fader | Layer video opacity |
+| **M** | Layer master |
+| **A** | Layer audio volume |
+| **V** | Layer video opacity |
 
-Above the top layer, the **COMPOSITION** row has **X ALL** (disconnect all clips), **B** (composition bypass / blackout, toggles) and the **GM** grand master fader.
+Above the top layer, the **COMPOSITION** row has **X ALL** (disconnect all clips), **B** (composition bypass / blackout, toggles) and **GM** (grand master).
 
-Faders are rows of tap steps (0 / 25 / 50 / 75 / 100 %); lit cells show the level last set from MA3. Changes made directly in Resolume are not read back until the next **SYNC**. Like clip taps, these controls are sent while **POLL** (or **TRIG**) is on.
+**M / A / V / GM** show the current level. Tapping one opens a fader popup; drag it and Resolume follows (the newest position is sent on each poll step). Opening a fader also starts **POLL**. Changes made directly in Resolume are not read back until the next **SYNC**.
 
 Playing clips: thicker **red** border (and optional name prefix `>`). Idle clips: black border.
 

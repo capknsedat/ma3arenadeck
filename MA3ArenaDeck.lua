@@ -25,7 +25,7 @@ local signalTable = select(3, ...)
 local myHandle = select(4, ...)
 
 -- Bump when changing runtime behavior so System Monitor proves the reload.
-local PLUGIN_VERSION = "2026-10-04c"
+local PLUGIN_VERSION = "2026-10-04d"
 
 ------------------------------------------------------------------------
 -- Configuration (defaults; overridden by GlobalVars / setup dialog)
@@ -110,13 +110,11 @@ lc.scan_cursor = {}
 lc.SCAN_PER_TICK = 2
 
 -- Layer / composition controls left of the layer labels:
---   [X] [M fader] [A fader] [V fader]   (one row per layer)
---   [X] [B]       [Master fader]        (composition row above the top layer)
--- A fader is a row of tap steps; the lit cells show the current level.
+--   [X] [M] [A] [V]   (one row per layer)
+--   [X] [B] [GM]      (composition row above the top layer)
+-- M / A / V / GM show the level; tapping one opens a fader popup.
 lc.SHOW_LAYER_CONTROLS = true
-lc.LEVEL_STEPS = { 0, 0.25, 0.50, 0.75, 1.00 }
-lc.STEP_WIDTH = 30
-lc.STEP_GAP = 4
+lc.FADER_BTN_WIDTH = 110
 lc.FADER_GAP = 14
 lc.CTRL_BTN_WIDTH = 60
 lc.LEVEL_COLOR = {
@@ -1955,46 +1953,29 @@ function lc.ensure_layer_control_macros(grid, first_index)
         def.macro_index = first_index + #defs
         defs[#defs + 1] = def
     end
-
-    add({ scope = 0, kind = "clear", action = "clearall", name = "MAD_ClearAll" })
-    add({ scope = 0, kind = "bypass", action = "bypass", name = "MAD_Bypass" })
-    for _, step in ipairs(lc.LEVEL_STEPS) do
+    local function fader(scope, kind, name)
         add({
-            scope = 0,
-            kind = "master",
-            step = step,
-            action = string.format("lvl,0,master,%.2f,%.4f", step, step),
-            name = string.format("MAD_Master_%d", math.floor(step * 100 + 0.5)),
+            scope = scope,
+            kind = kind,
+            line = plugin_command(string.format("fader %d %s", scope, kind)),
+            name = name,
         })
     end
+
+    add({ scope = 0, kind = "clear", line = lc.action_macro_line("clearall"), name = "MAD_ClearAll" })
+    add({ scope = 0, kind = "bypass", line = lc.action_macro_line("bypass"), name = "MAD_Bypass" })
+    fader(0, "master", "MAD_GrandMaster")
 
     for _, layer in ipairs(grid.layers or {}) do
         local L = layer.index
         add({
             scope = L,
             kind = "clear",
-            action = string.format("clear,%d", L),
+            line = lc.action_macro_line(string.format("clear,%d", L)),
             name = string.format("MAD_L%d_Clear", L),
         })
         for _, kind in ipairs({ "master", "audio", "video" }) do
-            for _, step in ipairs(lc.LEVEL_STEPS) do
-                local raw = step
-                if kind == "audio" then
-                    raw = lc.fraction_to_volume(layer.volume, step)
-                end
-                add({
-                    scope = L,
-                    kind = kind,
-                    step = step,
-                    action = string.format("lvl,%d,%s,%.2f,%.4f", L, kind, step, raw),
-                    name = string.format(
-                        "MAD_L%d_%s_%d",
-                        L,
-                        kind:sub(1, 1):upper(),
-                        math.floor(step * 100 + 0.5)
-                    ),
-                })
-            end
+            fader(L, kind, string.format("MAD_L%d_%s", L, kind:sub(1, 1):upper()))
         end
     end
 
@@ -2008,7 +1989,7 @@ function lc.ensure_layer_control_macros(grid, first_index)
             def.macro_index = nil
         else
             macro:Set("Name", def.name)
-            write_macro_lines(macro, def.macro_index, { lc.action_macro_line(def.action) })
+            write_macro_lines(macro, def.macro_index, { def.line })
         end
     end
     Printf(
@@ -2812,11 +2793,47 @@ function lc.bypass_appearance(on)
     return ensure_solid_appearance(on and "MAD_Bypass_On" or "MAD_Bypass_Off", c.r, c.g, c.b)
 end
 
-function lc.style_level_cell(element, kind, step, value)
-    local lit = step <= (value or 0) + 0.001
+function lc.fader_label(scope, kind, value)
+    local name = scope == 0 and "GM" or (kind == "master" and "M" or kind:sub(1, 1):upper())
+    return string.format("%s %d%%", name, math.floor((value or 0) * 100 + 0.5))
+end
+
+function lc.style_fader_button(element, scope, kind, value)
+    local lit = (value or 0) > 0.001
     assign_appearance(element, lc.level_cell_appearance(kind, lit))
     local c = lit and (lc.LEVEL_COLOR[kind] or lc.LEVEL_COLOR.master) or lc.LEVEL_COLOR.off
     set_element_border_color(element, c.r, c.g, c.b)
+    pcall(function()
+        element:Set("customtexttext", lc.fader_label(scope, kind, value))
+    end)
+end
+
+--- Last level sent from MA3 (0..1), kept in GlobalVars so every plugin
+--- call (layout tap, fader popup, poll loop) sees the same value.
+function lc.get_level(scope, kind)
+    return tonumber(cfg_get(string.format("Lvl_%d_%s", scope, kind), 1)) or 1
+end
+
+function lc.set_level(scope, kind, value)
+    cfg_set(string.format("Lvl_%d_%s", scope, kind), string.format("%.4f", value or 0))
+end
+
+--- Layer audio volume range stored at SYNC ("min,max"); nil = linear 0..1.
+function lc.get_volume_param(scope)
+    local v = cfg_get(string.format("VolR_%d", scope), "")
+    local min, max = tostring(v):match("^(%-?[%d%.]+),(%-?[%d%.]+)$")
+    if not min then
+        return nil
+    end
+    return { min = tonumber(min), max = tonumber(max) }
+end
+
+function lc.set_volume_param(scope, param)
+    local value = ""
+    if type(param) == "table" and param.min ~= nil and param.max ~= nil then
+        value = string.format("%.4f,%.4f", tonumber(param.min) or 0, tonumber(param.max) or 1)
+    end
+    cfg_set(string.format("VolR_%d", scope), value)
 end
 
 function lc.style_bypass_button(element, on)
@@ -2845,33 +2862,35 @@ function lc.update_level_display(scope, kind, value)
         pcall(function()
             note = element.Note or element.note
         end)
-        local s_scope, s_kind, s_step = lc.parse_level_note(note)
-        if s_scope == scope and kind == "bypass" and s_kind == "bypass" then
-            lc.style_bypass_button(element, value and true or false)
-        elseif s_scope == scope and s_kind == kind and s_step and kind ~= "bypass" then
-            lc.style_level_cell(element, kind, s_step, value)
+        local s_scope, s_kind = lc.parse_level_note(note)
+        if s_scope == scope and s_kind == kind then
+            if kind == "bypass" then
+                lc.style_bypass_button(element, value and true or false)
+            else
+                lc.style_fader_button(element, scope, kind, value)
+            end
         end
     end
 end
 
---- Build the X / B buttons and step faders left of the layer labels.
+--- Build the X / B buttons and fader buttons left of the layer labels.
 function lc.add_layer_controls(layout, grid, first_macro_index)
     local defs = lc.ensure_layer_control_macros(grid, first_macro_index)
     local created = 0
     local layer_count = grid.layer_count or 0
 
-    local levels = { [0] = { master = grid.master or 1 } }
+    lc.set_level(0, "master", grid.master or 1)
     for _, layer in ipairs(grid.layers or {}) do
-        levels[layer.index] = {
-            master = layer.master or 1,
-            video = layer.opacity or 1,
-            audio = lc.volume_to_fraction(layer.volume),
-        }
+        lc.set_level(layer.index, "master", layer.master or 1)
+        lc.set_level(layer.index, "video", layer.opacity or 1)
+        lc.set_level(layer.index, "audio", lc.volume_to_fraction(layer.volume))
+        lc.set_volume_param(layer.index, layer.volume)
     end
     lc.set_bypass_flag(grid.bypassed)
 
-    local fader_w = (#lc.LEVEL_STEPS * lc.STEP_WIDTH) + ((#lc.LEVEL_STEPS - 1) * lc.STEP_GAP)
-    local strip_w = lc.CTRL_BTN_WIDTH + lc.FADER_GAP + 3 * (fader_w + lc.FADER_GAP)
+    local fw = lc.FADER_BTN_WIDTH
+    local gap = lc.FADER_GAP
+    local strip_w = lc.CTRL_BTN_WIDTH + gap + 3 * (fw + gap)
     local x0 = ORIGIN_X - strip_w
 
     local function row_y(scope)
@@ -2883,56 +2902,30 @@ function lc.add_layer_controls(layout, grid, first_macro_index)
         return y
     end
 
-    local function fader_x(scope, kind)
-        local slot
-        if scope == 0 then
-            slot = 2 -- after X and B
-        else
-            slot = ({ master = 0, audio = 1, video = 2 })[kind] or 0
-        end
-        return x0 + lc.CTRL_BTN_WIDTH + lc.FADER_GAP + slot * (fader_w + lc.FADER_GAP)
-    end
-
-    local step_pos = {}
-    for i, step in ipairs(lc.LEVEL_STEPS) do
-        step_pos[string.format("%.2f", step)] = i - 1
-    end
+    local slots = { bypass = 0, master = 0, audio = 1, video = 2 }
 
     for _, def in ipairs(defs) do
         if def.macro_index then
-            local y = row_y(def.scope)
             local opts = {
-                y = y,
+                y = row_y(def.scope),
                 height = CELL_HEIGHT,
-                text_size = 14,
+                text_size = 18,
                 border = 3,
+                note = lc.level_note(def.scope, def.kind, 0),
             }
             if def.kind == "clear" then
                 opts.x = x0
                 opts.width = lc.CTRL_BTN_WIDTH
                 opts.text = def.scope == 0 and "X ALL" or "X"
-                opts.text_size = 20
-                opts.note = lc.level_note(def.scope, "clear", 0)
-            elseif def.kind == "bypass" then
-                opts.x = x0 + lc.CTRL_BTN_WIDTH + lc.FADER_GAP
-                opts.width = fader_w
-                opts.text = "B"
-                opts.text_size = 20
-                opts.note = lc.level_note(def.scope, "bypass", 0)
             else
-                local i = step_pos[string.format("%.2f", def.step)] or 0
-                opts.x = fader_x(def.scope, def.kind) + i * (lc.STEP_WIDTH + lc.STEP_GAP)
-                opts.width = lc.STEP_WIDTH
-                opts.height = CELL_HEIGHT
-                opts.text_size = 10
-                opts.text_align_v = "Bottom"
-                if i == 0 then
-                    local letter = def.kind == "master" and "M" or def.kind:sub(1, 1):upper()
-                    opts.text = def.scope == 0 and "GM" or letter
-                else
-                    opts.text = tostring(math.floor(def.step * 100 + 0.5))
+                local slot = slots[def.kind] or 0
+                if def.scope == 0 and def.kind == "master" then
+                    slot = 1 -- GM next to B
                 end
-                opts.note = lc.level_note(def.scope, def.kind, def.step)
+                opts.x = x0 + lc.CTRL_BTN_WIDTH + gap + slot * (fw + gap)
+                opts.width = fw
+                opts.text = def.kind == "bypass" and "B"
+                    or lc.fader_label(def.scope, def.kind, lc.get_level(def.scope, def.kind))
             end
 
             local el = add_element(layout, opts)
@@ -2944,8 +2937,7 @@ function lc.add_layer_controls(layout, grid, first_macro_index)
                 elseif def.kind == "bypass" then
                     lc.style_bypass_button(el, grid.bypassed)
                 else
-                    local lv = levels[def.scope] and levels[def.scope][def.kind] or 1
-                    lc.style_level_cell(el, def.kind, def.step, lv)
+                    lc.style_fader_button(el, def.scope, def.kind, lc.get_level(def.scope, def.kind))
                 end
                 created = created + 1
             end
@@ -3168,6 +3160,7 @@ function lc.run_control_action(action)
             local url = L == 0 and composition_url() or layer_url(L)
             ok, err = lc.http_put(url, lc.layer_level_body(kind, tonumber(raw) or 0), 2)
             if ok then
+                lc.set_level(L, kind, tonumber(step) or 0)
                 lc.update_level_display(L, kind, tonumber(step) or 0)
             end
         else
@@ -3196,10 +3189,24 @@ function lc.process_pending_actions()
     pcall(function()
         SetVar(GlobalVars(), ACTION_VAR, "")
     end)
-    local any = false
+    -- A fader drag queues many levels for the same target: only send the
+    -- newest one per layer + parameter.
+    local actions = {}
+    local last_for = {}
     for action in tostring(v):gmatch("[^;]+") do
-        if lc.run_control_action(action) then
-            any = true
+        actions[#actions + 1] = action
+        local key = action:match("^(lvl,%d+,%a+),")
+        if key then
+            last_for[key] = #actions
+        end
+    end
+    local any = false
+    for i, action in ipairs(actions) do
+        local key = action:match("^(lvl,%d+,%a+),")
+        if not key or last_for[key] == i then
+            if lc.run_control_action(action) then
+                any = true
+            end
         end
     end
     return any
@@ -3473,6 +3480,147 @@ local function run_monitor_loop()
 end
 
 ------------------------------------------------------------------------
+-- Fader popup
+------------------------------------------------------------------------
+
+--- Queue a level for the poll loop (same path as the layout buttons).
+function lc.queue_level(scope, kind, frac)
+    if frac < 0 then
+        frac = 0
+    elseif frac > 1 then
+        frac = 1
+    end
+    local raw = frac
+    if kind == "audio" then
+        raw = lc.fraction_to_volume(lc.get_volume_param(scope), frac)
+    end
+    local action = string.format("lvl,%d,%s,%.3f,%.4f", scope, kind, frac, raw)
+    pcall(function()
+        local cur = tostring(GetVar(GlobalVars(), ACTION_VAR) or "")
+        SetVar(GlobalVars(), ACTION_VAR, cur .. ";" .. action)
+    end)
+end
+
+--- UiFader values arrive as "50%" (or a number); return 0..1.
+function lc.parse_fader_value(v)
+    local n = tonumber(tostring(v or ""):match("%-?[%d%.]+"))
+    if n == nil then
+        return nil
+    end
+    if n > 1.0001 or tostring(v):find("%%") then
+        n = n / 100
+    end
+    return n
+end
+
+function lc.fader_title(scope, kind)
+    if scope == 0 then
+        return "Composition Grand Master"
+    end
+    local names = { master = "Master", audio = "Audio", video = "Video" }
+    return string.format("Layer %d %s", scope, names[kind] or kind)
+end
+
+--- Pop up a draggable fader for one layer / composition level.
+--- Returns true when the on-screen dialog was built.
+function lc.open_fader_dialog(scope, kind)
+    local current = lc.get_level(scope, kind)
+
+    local signals = signalTable or {}
+    signals.MADFaderChanged = function(caller)
+        local value = nil
+        pcall(function()
+            value = caller.Value
+        end)
+        if value == nil then
+            pcall(function()
+                value = caller:Get("Value")
+            end)
+        end
+        local frac = lc.parse_fader_value(value)
+        if frac then
+            lc.queue_level(scope, kind, frac)
+        end
+    end
+
+    local ok, err = pcall(function()
+        local display = GetFocusDisplay()
+        local overlay = display.ScreenOverlay
+        overlay:ClearUIChildren()
+
+        local base = overlay:Append("BaseInput")
+        base.Name = "MA3ArenaDeckFader"
+        base.W = 260
+        base.H = 620
+        base.Columns = 1
+        base.Rows = 2
+        base[1][1].SizePolicy = "Fixed"
+        base[1][1].Size = "60"
+        base[1][2].SizePolicy = "Stretch"
+        base.AutoClose = "No"
+        base.CloseOnEscape = "Yes"
+
+        local title = base:Append("TitleBar")
+        title.Columns = 2
+        title.Rows = 1
+        title.Anchors = "0,0"
+        title[2][2].SizePolicy = "Fixed"
+        title[2][2].Size = "50"
+        title.Texture = "corner2"
+
+        local caption = title:Append("TitleButton")
+        caption.Text = lc.fader_title(scope, kind)
+        caption.Texture = "corner1"
+        caption.Anchors = "0,0"
+
+        local close = title:Append("CloseButton")
+        close.Anchors = "1,0"
+        close.Texture = "corner2"
+
+        local frame = base:Append("DialogFrame")
+        frame.H = "100%"
+        frame.W = "100%"
+        frame.Columns = 1
+        frame.Rows = 1
+        frame.Anchors = { left = 0, right = 0, top = 1, bottom = 1 }
+
+        local fader = frame:Append("UiFader")
+        fader.Anchors = "0,0"
+        fader.Text = lc.fader_label(scope, kind, current)
+        fader.PluginComponent = myHandle
+        fader.Changed = "MADFaderChanged"
+        pcall(function()
+            local c = lc.LEVEL_COLOR[kind] or lc.LEVEL_COLOR.master
+            fader.Color = string.format("%.3f,%.3f,%.3f,1", c.r / 255, c.g / 255, c.b / 255)
+        end)
+        -- Start at the current level where the build allows setting it.
+        pcall(function()
+            fader.Value = string.format("%d%%", math.floor(current * 100 + 0.5))
+        end)
+    end)
+
+    if ok then
+        Printf("MA3ArenaDeck: fader popup %s", lc.fader_title(scope, kind))
+        return true
+    end
+
+    -- Fallback: type a value (0-100) when the UI objects are unavailable.
+    Printf("MA3ArenaDeck: fader popup failed (%s), asking for a value", tostring(err))
+    local typed = nil
+    pcall(function()
+        typed = TextInput(
+            lc.fader_title(scope, kind) .. " (0-100)",
+            tostring(math.floor(current * 100 + 0.5))
+        )
+    end)
+    local n = tonumber(typed)
+    if n then
+        lc.queue_level(scope, kind, n / 100)
+    end
+    return false
+end
+
+------------------------------------------------------------------------
 -- Actions
 ------------------------------------------------------------------------
 
@@ -3554,6 +3702,18 @@ function Main(display_handle, argument)
     local trig_id = arg:match("^trigger%s+id%s+([%w%-]+)$")
     if trig_id then
         fire_resolume_clip(nil, nil, trig_id)
+        return
+    end
+
+    -- Layout M / A / V / GM buttons: open a fader popup, then keep polling
+    -- (this call replaces the running monitor) so fader moves are sent.
+    local fader_scope, fader_kind = arg:match("^fader%s+(%d+)%s+(%a+)$")
+    if fader_scope then
+        if not ensure_deps() then
+            return
+        end
+        lc.open_fader_dialog(tonumber(fader_scope), fader_kind)
+        run_monitor_loop()
         return
     end
 
