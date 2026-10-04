@@ -25,7 +25,7 @@ local signalTable = select(3, ...)
 local myHandle = select(4, ...)
 
 -- Bump when changing runtime behavior so System Monitor proves the reload.
-local PLUGIN_VERSION = "2026-10-04i"
+local PLUGIN_VERSION = "2026-10-04j"
 
 ------------------------------------------------------------------------
 -- Configuration (defaults; overridden by GlobalVars / setup dialog)
@@ -84,9 +84,10 @@ local PLAYING_BORDER_B = 0
 local IDLE_BORDER_R = 0
 local IDLE_BORDER_G = 0
 local IDLE_BORDER_B = 0
-local LAYER_BORDER_R = 220
-local LAYER_BORDER_G = 220
-local LAYER_BORDER_B = 220
+-- Layer / COMPOSITION header frames: black like idle clips
+local LAYER_BORDER_R = 0
+local LAYER_BORDER_G = 0
+local LAYER_BORDER_B = 0
 
 -- Control macros + buttons under the grid
 local MACRO_START_INDEX = 200
@@ -338,12 +339,6 @@ local function show_setup_dialog(display_handle)
                 whiteFilter = "0123456789",
                 vkPlugin = "TextInputNumOnly",
             },
-            {
-                name = "08 Poll Interval (s)",
-                value = string.format("%.2f", get_poll_interval()),
-                whiteFilter = "0123456789.",
-                vkPlugin = "TextInputNumOnly",
-            },
         },
         states = {
             { name = "Fetch thumbnails", state = FETCH_THUMBNAILS and true or false },
@@ -425,9 +420,6 @@ local function show_setup_dialog(display_handle)
     MACRO_START_INDEX = tonumber(mb_input(result, "07 Macro Start", MACRO_START_INDEX))
         or MACRO_START_INDEX
     refresh_derived_indexes()
-    POLL_INTERVAL_SEC = nearest_poll_interval(
-        mb_input(result, "08 Poll Interval (s)", POLL_INTERVAL_SEC)
-    )
     FETCH_THUMBNAILS = mb_state(result, "Fetch thumbnails", FETCH_THUMBNAILS)
     ONLY_WITH_THUMBNAIL = mb_state(result, "Only clips with thumbnail", ONLY_WITH_THUMBNAIL)
     HIGHLIGHT_PREVIEWING = mb_state(result, "Highlight previewing", HIGHLIGHT_PREVIEWING)
@@ -3747,6 +3739,195 @@ local function run_full_sync()
 end
 
 ------------------------------------------------------------------------
+-- Install / Uninstall
+------------------------------------------------------------------------
+
+--- Map a MessageBox result to its command value (0 when cancelled).
+function lc.mb_command(ok, result, names)
+    if not ok or type(result) ~= "table" or result.success == false then
+        return 0
+    end
+    local cmd = tonumber(result.result)
+    if cmd == nil and type(result.result) == "string" then
+        cmd = names[result.result:lower()]
+    end
+    return cmd or 0
+end
+
+--- First screen when the plugin is tapped in the pool.
+--- Returns "install" | "uninstall" | "cancel".
+function lc.show_start_dialog(display_handle)
+    local options = {
+        title = "MA3ArenaDeck",
+        message = "Install: set up Resolume connection and build the layout.\n"
+            .. "Uninstall: remove the layout, macros, appearances and images\n"
+            .. "this plugin created, and its saved settings.",
+        commands = {
+            { value = 1, name = "Install" },
+            { value = 2, name = "Uninstall" },
+            { value = 0, name = "Cancel" },
+        },
+    }
+    if display_handle ~= nil then
+        options.display = display_handle
+    end
+    local ok, result = pcall(MessageBox, options)
+    local cmd = lc.mb_command(ok, result, { install = 1, uninstall = 2 })
+    if cmd == 1 then
+        return "install"
+    elseif cmd == 2 then
+        return "uninstall"
+    end
+    Printf("MA3ArenaDeck: cancelled")
+    return "cancel"
+end
+
+function lc.confirm_uninstall(display_handle)
+    local options = {
+        title = "MA3ArenaDeck Uninstall",
+        message = string.format(
+            "Delete Layout %d '%s', all MAD_ macros, appearances and images\n"
+                .. "(from slot %d / %d / %d) and the plugin settings?",
+            LAYOUT_INDEX,
+            LAYOUT_NAME,
+            MACRO_START_INDEX,
+            APPEARANCE_START_INDEX,
+            IMAGE_START_INDEX
+        ),
+        commands = {
+            { value = 1, name = "Uninstall" },
+            { value = 0, name = "Cancel" },
+        },
+    }
+    if display_handle ~= nil then
+        options.display = display_handle
+    end
+    local ok, result = pcall(MessageBox, options)
+    return lc.mb_command(ok, result, { uninstall = 1 }) == 1
+end
+
+function lc.has_plugin_prefix(obj)
+    local name = object_name(obj)
+    return type(name) == "string"
+        and (name:sub(1, #IMAGE_NAME_PREFIX) == IMAGE_NAME_PREFIX
+            or name:sub(1, #APPEARANCE_PLAY_PREFIX) == APPEARANCE_PLAY_PREFIX)
+end
+
+--- Delete pool objects named MAD_* / MADP_* in [start, start + count).
+--- on_delete(index, obj) runs before each delete. Returns how many went.
+function lc.delete_prefixed(pool, delete_cmd, start, count, on_delete)
+    if pool == nil then
+        return 0
+    end
+    local removed = 0
+    for i = start + count - 1, start, -1 do
+        local obj = pool[i]
+        if pool_object_valid(obj) and lc.has_plugin_prefix(obj) then
+            if on_delete then
+                on_delete(i, obj)
+            end
+            pcall(function()
+                pool:Delete(i)
+            end)
+            if pool_object_valid(pool[i]) then
+                pcall(function()
+                    Cmd(string.format(delete_cmd, i))
+                end)
+            end
+            removed = removed + 1
+        end
+    end
+    return removed
+end
+
+function lc.uninstall()
+    set_monitor_flag(false)
+    Printf("MA3ArenaDeck: uninstalling (v%s)...", PLUGIN_VERSION)
+
+    -- Layout: only when it is still ours (name matches).
+    local layouts = get_layouts_pool()
+    local layout = layouts and layouts[LAYOUT_INDEX]
+    local layout_removed = false
+    if pool_object_valid(layout) and object_name(layout) == LAYOUT_NAME then
+        pcall(function()
+            layouts:Delete(LAYOUT_INDEX)
+        end)
+        if pool_object_valid(layouts[LAYOUT_INDEX]) then
+            pcall(function()
+                Cmd(string.format("Delete Layout %d /NoConfirmation", LAYOUT_INDEX))
+            end)
+        end
+        layout_removed = true
+    elseif pool_object_valid(layout) then
+        Printf(
+            "MA3ArenaDeck: Layout %d is named '%s', not '%s'; left in place",
+            LAYOUT_INDEX,
+            tostring(object_name(layout)),
+            LAYOUT_NAME
+        )
+    end
+
+    -- Macros: control (SYNC/POLL...), per-clip fire and layer controls.
+    local macros = DataPool().Macros
+    local macro_count = lc.delete_prefixed(macros, "Delete Macro %d /NoConfirmation", MACRO_START_INDEX, 20 + MAX_MEDIA_SLOTS * 2)
+
+    local app_count = lc.delete_prefixed(
+        get_appearances_pool(),
+        "Delete Appearance %d /NoConfirmation",
+        APPEARANCE_START_INDEX,
+        MAX_MEDIA_SLOTS * 2
+    )
+
+    -- Images + the thumbnail files written to the user image library.
+    local lib = images_library_path()
+    local file_count = 0
+    local image_count = lc.delete_prefixed(
+        get_images_pool(),
+        "Delete Image " .. IMAGE_POOL .. ".%d /NoConfirmation",
+        IMAGE_START_INDEX,
+        MAX_MEDIA_SLOTS,
+        function(_, obj)
+            local base = object_name(obj)
+            if lib and lib ~= "" and base then
+                for _, f in ipairs({ base .. ".png", base .. ".png.xml" }) do
+                    if os.remove(path_join(lib, f)) then
+                        file_count = file_count + 1
+                    end
+                end
+            end
+        end
+    )
+
+    -- Saved settings and runtime state (GlobalVars MA3ArenaDeck_*).
+    local keys = {
+        "Host", "Port", "LayoutIndex", "LayoutName", "ImageStart", "AppearanceStart",
+        "MacroStart", "OnlyWithThumbnail", "FetchThumbnails", "HighlightPreviewing",
+        "PollInterval", "Monitor", "MonitorOwner", "Trigger", "Fire", "Action",
+    }
+    for scope = 0, 64 do
+        keys[#keys + 1] = string.format("VolR_%d", scope)
+        for _, kind in ipairs({ "master", "audio", "video", "bypass" }) do
+            keys[#keys + 1] = string.format("Lvl_%d_%s", scope, kind)
+        end
+    end
+    local vars = GlobalVars()
+    for _, key in ipairs(keys) do
+        pcall(function()
+            DelVar(vars, CFG_PREFIX .. key)
+        end)
+    end
+
+    Printf(
+        "MA3ArenaDeck: uninstalled (layout %s, %d macros, %d appearances, %d images, %d files, settings cleared)",
+        layout_removed and "removed" or "kept",
+        macro_count,
+        app_count,
+        image_count,
+        file_count
+    )
+end
+
+------------------------------------------------------------------------
 -- Entry point
 ------------------------------------------------------------------------
 
@@ -3831,7 +4012,17 @@ function Main(display_handle, argument)
         return
     end
 
-    -- Plugin pool / unknown / setup: always show configuration UI first.
+    -- Plugin pool / unknown: Install / Uninstall / Cancel first.
+    local choice = lc.show_start_dialog(display_handle)
+    if choice == "uninstall" then
+        if lc.confirm_uninstall(display_handle) then
+            lc.uninstall()
+        end
+        return
+    end
+    if choice ~= "install" then
+        return
+    end
     local action = show_setup_dialog(display_handle)
     if action ~= "sync" then
         return

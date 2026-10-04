@@ -94,7 +94,7 @@ If both run on the **same computer**, change Resolume’s listen port (for examp
 ## Quick start
 
 1. Enable the Resolume webserver (see above) and load a composition with clips.
-2. Tap the **MA3ArenaDeck** plugin in the Plugin pool → setup dialog opens.
+2. Tap the **MA3ArenaDeck** plugin in the Plugin pool → choose **Install** → setup dialog opens.
 3. Set **Host** / **Port** (and layout / pool starts if you need non-defaults) → **Sync**.
 4. Open **Layout** (default: Layout 1, labelled *MA3ArenaDeck*).
 5. Tap **POLL ON** to follow playing clips, or **TRIG ON** to also fire clips from the layout (poll starts automatically with trigger).
@@ -134,7 +134,7 @@ With **TRIG ON**, a tapped clip is sent to Resolume within a few tens of millise
 
 ## Setup dialog options
 
-Opened when you run the plugin from the pool (no argument):
+Opened when you run the plugin from the pool (no argument) and pick **Install**. The poll interval is set with the **POLL x.xxs** layout button, not here.
 
 | Field | Meaning |
 | --- | --- |
@@ -142,12 +142,15 @@ Opened when you run the plugin from the pool (no argument):
 | Port | Resolume webserver port |
 | Layout Index / Name | Where the grid is built |
 | Image / Appearance / Macro start | Pool indexes used for generated objects |
-| Poll interval | Default polling period |
 | Fetch thumbnails | Import PNG thumbs from Resolume |
 | Only clips with thumbnail | Skip empty / default slots |
 | Highlight previewing | Also treat “Previewing” as active |
 
 Use **Sync** to save and rebuild, **Save Only** to store settings without rebuilding, or **Cancel**.
+
+### Uninstall
+
+Tapping the plugin first shows **Install / Uninstall / Cancel**. **Uninstall** (after a confirm) removes everything the plugin created: the layout (only if it still has the configured name), every `MAD_*` macro, `MAD_*` / `MADP_*` appearance and `MAD_*` image in the configured pool ranges, the thumbnail PNG files in the user image library, and all saved `MA3ArenaDeck_*` settings. Objects with other names in those ranges are left alone.
 
 ---
 
@@ -157,7 +160,7 @@ Useful if you call the plugin from your own macros:
 
 | Argument | Effect |
 | --- | --- |
-| *(none)* / `setup` | Setup dialog, then sync if confirmed |
+| *(none)* / `setup` | Install / Uninstall / Cancel, then setup dialog or uninstall |
 | `sync` | Full sync (no dialog) |
 | `monitor` | Start poll loop |
 | `stop` | Stop poll loop |
