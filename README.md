@@ -124,7 +124,7 @@ Left of the layer labels, every layer row gets:
 
 Above the top layer, the **COMPOSITION** row has **X ALL** (disconnect all clips), **B** (composition bypass / blackout, toggles) and **GM** (grand master).
 
-**M / A / V / GM** show the current level. Tapping one opens a fader popup; drag it and Resolume follows (the newest position is sent on each poll step). Opening a fader also starts **POLL**. Changes made directly in Resolume are not read back until the next **SYNC**.
+**M / A / V / GM** show the current level. Tapping one opens a fader popup; drag it and Resolume follows (the newest position is sent on each poll step). If the popup cannot start at the current level, it only takes over once it reaches that level (shown as `A 20% -> 38%`), so nothing jumps. Opening a fader also starts **POLL**. Changes made directly in Resolume are not read back until the next **SYNC**.
 
 Playing clips: thicker **red** border (and optional name prefix `>`). Idle clips: black border.
 

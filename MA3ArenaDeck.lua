@@ -25,7 +25,7 @@ local signalTable = select(3, ...)
 local myHandle = select(4, ...)
 
 -- Bump when changing runtime behavior so System Monitor proves the reload.
-local PLUGIN_VERSION = "2026-10-04e"
+local PLUGIN_VERSION = "2026-10-04f"
 
 ------------------------------------------------------------------------
 -- Configuration (defaults; overridden by GlobalVars / setup dialog)
@@ -1537,22 +1537,27 @@ local function ensure_appearances_for_image(image_info, clip_id)
 end
 
 local function ensure_appearances_without_image(clip_id)
-    local idle_name = APPEARANCE_IDLE_PREFIX .. tostring(clip_id)
-    local play_name = APPEARANCE_PLAY_PREFIX .. tostring(clip_id)
-
-    local idle, idle_err = ensure_named_appearance(idle_name, nil, false)
-    if not idle then
-        return nil, idle_err
+    -- Clips without a thumbnail (e.g. effect / generator clips) get no
+    -- appearance at all; an empty one only shows MA3's macro icon.
+    -- Remove ones left over from earlier syncs so lookups find nothing.
+    local appearances = get_appearances_pool()
+    if appearances ~= nil then
+        for _, prefix in ipairs({ APPEARANCE_IDLE_PREFIX, APPEARANCE_PLAY_PREFIX }) do
+            local name = prefix .. tostring(clip_id)
+            local idx = find_pool_index_by_name(appearances, name, APPEARANCE_START_INDEX, MAX_MEDIA_SLOTS)
+            if idx then
+                local ok = pcall(function()
+                    appearances:Delete(idx)
+                end)
+                if not ok then
+                    pcall(function()
+                        Cmd(string.format("Delete Appearance %d /NoConfirm", idx))
+                    end)
+                end
+            end
+        end
     end
-    local play, play_err = ensure_named_appearance(play_name, nil, true)
-    if not play then
-        return nil, play_err
-    end
-    return {
-        image = nil,
-        appearance_idle = idle,
-        appearance_play = play,
-    }
+    return { image = nil }
 end
 
 local function lookup_appearances_for_clip(clip_id)
@@ -2084,32 +2089,35 @@ local function label_pos(layer_index, _layer_count)
     return x, y
 end
 
---- Layout elements that carry a Macro draw that macro's pool icon (the
---- paper-scroll symbol) on top of the element. Give the macro itself the
---- same appearance so the button shows its colour instead.
-function lc.assign_object_appearance(element, appearance_info)
+--- Set "no appearance" on a layout element and on the Macro it carries.
+--- With an appearance (even a plain colour) MA3 draws the macro's paper
+--- icon; with none the button is just its border and centred text.
+function lc.clear_appearance(element)
+    if element == nil then
+        return
+    end
+    pcall(function()
+        element:Set("Appearance", "")
+    end)
+    local idx = nil
+    pcall(function()
+        idx = element:Index()
+    end)
+    if idx then
+        pcall(function()
+            Cmd(string.format('Set Layout %d.%d Property "Appearance" ""', LAYOUT_INDEX, idx))
+        end)
+    end
     local obj = nil
     pcall(function()
         obj = element.Object
     end)
-    if obj == nil or type(obj) == "string" then
-        return
-    end
-    local ok = pcall(function()
-        obj.Appearance = appearance_info.handle
-    end)
-    if not ok then
-        ok = pcall(function()
-            obj:Set("Appearance", appearance_info.handle:AddrNative())
-        end)
-    end
-    if not ok then
+    if obj ~= nil and type(obj) ~= "string" then
         pcall(function()
-            Cmd(string.format(
-                "Assign Appearance %d At Macro %d",
-                appearance_info.index,
-                obj:Index()
-            ))
+            obj:Set("Appearance", "")
+        end)
+        pcall(function()
+            Cmd(string.format('Set Macro %d Property "Appearance" ""', obj:Index()))
         end)
     end
 end
@@ -2118,7 +2126,6 @@ local function assign_appearance(element, appearance_info)
     if element == nil or appearance_info == nil or appearance_info.handle == nil then
         return false
     end
-    lc.assign_object_appearance(element, appearance_info)
 
     local ok = pcall(function()
         element.Appearance = appearance_info.handle:AddrNative()
@@ -2165,97 +2172,6 @@ local function assign_appearance(element, appearance_info)
 end
 
 --- Solid fill Appearance for control buttons (no image).
-local function ensure_solid_appearance(app_name, r, g, b)
-    local appearances = get_appearances_pool()
-    if appearances == nil then
-        return nil
-    end
-
-    local app_index, err = ensure_pool_index(
-        appearances,
-        app_name,
-        APPEARANCE_START_INDEX,
-        MAX_MEDIA_SLOTS
-    )
-    if not app_index then
-        Printf("MA3ArenaDeck: solid appearance '%s' failed: %s", app_name, tostring(err))
-        return nil
-    end
-
-    if appearances[app_index] == nil then
-        ensure_pool_object(appearances, app_index)
-    end
-    local appearance = appearances[app_index]
-    if appearance == nil or not pool_object_valid(appearance) then
-        return nil
-    end
-
-    appearance:Set("Name", app_name)
-    local color01 = string.format("%.3f,%.3f,%.3f,1", r / 255, g / 255, b / 255)
-    pcall(function()
-        appearance:Set("Color", color01)
-    end)
-    pcall(function()
-        Cmd(string.format(
-            'Set Appearance %d Property "Color" "%s"',
-            app_index,
-            color01
-        ))
-    end)
-
-    local channel_props = {
-        { "ImageR", r },
-        { "ImageG", g },
-        { "ImageB", b },
-        { "BACKR", r },
-        { "BACKG", g },
-        { "BACKB", b },
-        { "BackR", r },
-        { "BackG", g },
-        { "BackB", b },
-        { "ImageAlpha", 255 },
-        { "BackAlpha", 255 },
-    }
-    for _, p in ipairs(channel_props) do
-        pcall(function()
-            appearance:Set(p[1], tostring(p[2]))
-        end)
-    end
-
-    return {
-        index = app_index,
-        name = app_name,
-        handle = appearance,
-    }
-end
-
-local function control_appearance_for(kind, active)
-    if kind == "monitor" then
-        local c = active and CTRL_COLOR.poll_on_active or CTRL_COLOR.poll_on_idle
-        local name = active and "MAD_Btn_PollOn_On" or "MAD_Btn_PollOn_Off"
-        return ensure_solid_appearance(name, c.r, c.g, c.b)
-    end
-    if kind == "stop" then
-        local c = active and CTRL_COLOR.poll_off_active or CTRL_COLOR.poll_off_idle
-        local name = active and "MAD_Btn_PollOff_On" or "MAD_Btn_PollOff_Off"
-        return ensure_solid_appearance(name, c.r, c.g, c.b)
-    end
-    if kind == "interval" then
-        local c = CTRL_COLOR.interval
-        return ensure_solid_appearance("MAD_Btn_Interval", c.r, c.g, c.b)
-    end
-    if kind == "trigger" then
-        local c = active and CTRL_COLOR.trigger_active or CTRL_COLOR.trigger_idle
-        local name = active and "MAD_Btn_Trig_On" or "MAD_Btn_Trig_Off"
-        return ensure_solid_appearance(name, c.r, c.g, c.b)
-    end
-    if kind == "sync" then
-        local c = CTRL_COLOR.sync
-        return ensure_solid_appearance("MAD_Btn_Sync", c.r, c.g, c.b)
-    end
-    return nil
-end
-
 local function element_addr(element)
     if element == nil then
         return nil
@@ -2372,11 +2288,9 @@ local function apply_control_chrome(element, kind, active)
     end)
     set_element_border_color(element, color.r, color.g, color.b)
 
-    -- Solid appearance fill (border color alone is unreliable on macro elements).
-    local app = control_appearance_for(kind, active)
-    if app then
-        assign_appearance(element, app)
-    end
+    -- No appearance: it only makes MA3 draw the macro icon; the coloured
+    -- border carries the state.
+    lc.clear_appearance(element)
 
     if kind == "interval" then
         pcall(function()
@@ -2810,20 +2724,6 @@ function lc.parse_level_note(note)
     return tonumber(scope), kind, tonumber(step)
 end
 
-function lc.level_cell_appearance(kind, lit)
-    if not lit then
-        local c = lc.LEVEL_COLOR.off
-        return ensure_solid_appearance("MAD_Lvl_Off", c.r, c.g, c.b)
-    end
-    local c = lc.LEVEL_COLOR[kind] or lc.LEVEL_COLOR.master
-    return ensure_solid_appearance("MAD_Lvl_" .. kind, c.r, c.g, c.b)
-end
-
-function lc.bypass_appearance(on)
-    local c = on and lc.LEVEL_COLOR.bypass_on or lc.LEVEL_COLOR.bypass_off
-    return ensure_solid_appearance(on and "MAD_Bypass_On" or "MAD_Bypass_Off", c.r, c.g, c.b)
-end
-
 function lc.fader_label(scope, kind, value)
     local name = scope == 0 and "GM" or (kind == "master" and "M" or kind:sub(1, 1):upper())
     return string.format("%s %d%%", name, math.floor((value or 0) * 100 + 0.5))
@@ -2831,7 +2731,7 @@ end
 
 function lc.style_fader_button(element, scope, kind, value)
     local lit = (value or 0) > 0.001
-    assign_appearance(element, lc.level_cell_appearance(kind, lit))
+    lc.clear_appearance(element)
     local c = lit and (lc.LEVEL_COLOR[kind] or lc.LEVEL_COLOR.master) or lc.LEVEL_COLOR.off
     set_element_border_color(element, c.r, c.g, c.b)
     pcall(function()
@@ -2868,7 +2768,9 @@ function lc.set_volume_param(scope, param)
 end
 
 function lc.style_bypass_button(element, on)
-    assign_appearance(element, lc.bypass_appearance(on))
+    lc.clear_appearance(element)
+    local c = on and lc.LEVEL_COLOR.bypass_on or lc.LEVEL_COLOR.bypass_off
+    set_element_border_color(element, c.r, c.g, c.b)
     pcall(function()
         element:Set("customtexttext", on and "B ON" or "B")
     end)
@@ -2940,8 +2842,8 @@ function lc.add_layer_controls(layout, grid, first_macro_index)
             local opts = {
                 y = row_y(def.scope),
                 height = CELL_HEIGHT,
-                text_size = 18,
-                border = 3,
+                text_size = 22,
+                border = 4,
                 note = lc.level_note(def.scope, def.kind, 0),
             }
             if def.kind == "clear" then
@@ -2964,7 +2866,8 @@ function lc.add_layer_controls(layout, grid, first_macro_index)
                 assign_clip_trigger_macro(el, def.macro_index)
                 if def.kind == "clear" then
                     local c = lc.LEVEL_COLOR.clear
-                    assign_appearance(el, ensure_solid_appearance("MAD_Clear", c.r, c.g, c.b))
+                    lc.clear_appearance(el)
+                    set_element_border_color(el, c.r, c.g, c.b)
                 elseif def.kind == "bypass" then
                     lc.style_bypass_button(el, grid.bypassed)
                 else
@@ -3557,6 +3460,8 @@ end
 function lc.open_fader_dialog(scope, kind)
     local current = lc.get_level(scope, kind)
 
+    local picked_up = false
+    local last_frac = nil
     local signals = signalTable or {}
     signals.MADFaderChanged = function(caller)
         local value = nil
@@ -3569,9 +3474,32 @@ function lc.open_fader_dialog(scope, kind)
             end)
         end
         local frac = lc.parse_fader_value(value)
-        if frac then
-            lc.queue_level(scope, kind, frac)
+        if not frac then
+            return
         end
+        -- Pick-up: the popup fader may open at 0 instead of the current
+        -- level. Send nothing until it reaches / crosses the current level,
+        -- so grabbing it never makes the picture or sound jump.
+        if not picked_up then
+            local near = math.abs(frac - current) <= 0.03
+            local crossed = last_frac ~= nil and (last_frac - current) * (frac - current) <= 0
+            last_frac = frac
+            if not (near or crossed) then
+                pcall(function()
+                    caller.Text = string.format(
+                        "%s -> %d%%",
+                        lc.fader_label(scope, kind, frac),
+                        math.floor(current * 100 + 0.5)
+                    )
+                end)
+                return
+            end
+            picked_up = true
+        end
+        pcall(function()
+            caller.Text = lc.fader_label(scope, kind, frac)
+        end)
+        lc.queue_level(scope, kind, frac)
     end
 
     local ok, err = pcall(function()
@@ -3624,10 +3552,35 @@ function lc.open_fader_dialog(scope, kind)
             local c = lc.LEVEL_COLOR[kind] or lc.LEVEL_COLOR.master
             fader.Color = string.format("%.3f,%.3f,%.3f,1", c.r / 255, c.g / 255, c.b / 255)
         end)
-        -- Start at the current level where the build allows setting it.
-        pcall(function()
-            fader.Value = string.format("%d%%", math.floor(current * 100 + 0.5))
+        -- Start at the current level where the build allows setting it
+        -- (UiFader.Value is read-only on some versions; pick-up covers that).
+        local pct = math.floor(current * 100 + 0.5)
+        local set_ok = pcall(function()
+            fader.Value = pct
         end)
+        if not set_ok then
+            set_ok = pcall(function()
+                fader:Set("Value", tostring(pct))
+            end)
+        end
+        if not set_ok then
+            pcall(function()
+                fader.Value = string.format("%d%%", pct)
+            end)
+        end
+        local start = nil
+        pcall(function()
+            start = lc.parse_fader_value(fader.Value)
+        end)
+        if start and math.abs(start - current) <= 0.03 then
+            picked_up = true
+        else
+            fader.Text = string.format(
+                "%s (%d%%)",
+                lc.fader_title(scope, kind),
+                pct
+            )
+        end
     end)
 
     if ok then
