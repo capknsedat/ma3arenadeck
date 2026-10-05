@@ -26,7 +26,7 @@ local signalTable = select(3, ...)
 local myHandle = select(4, ...)
 
 -- Bump when changing runtime behavior so System Monitor proves the reload.
-local PLUGIN_VERSION = "2026-10-05u"
+local PLUGIN_VERSION = "2026-10-05v"
 
 ------------------------------------------------------------------------
 -- Configuration (defaults; overridden by GlobalVars / setup dialog)
@@ -3922,6 +3922,75 @@ end
 
 --- Pop up a draggable fader for one layer / composition level.
 --- Returns true when the on-screen dialog was built.
+--- x, y, w, h from an AbsRect (table with x/y/w/h keys, X/Y/W/H keys,
+--- an array, or a "x,y,w,h" string, depending on the build).
+function lc.rect_numbers(r)
+    if r == nil then
+        return nil
+    end
+    if type(r) == "string" then
+        local n = {}
+        for v in r:gmatch("-?%d+%.?%d*") do
+            n[#n + 1] = tonumber(v)
+        end
+        r = n
+    end
+    local x, y, w, h
+    pcall(function()
+        x = r.x or r.X or r[1]
+        y = r.y or r.Y or r[2]
+        w = r.w or r.W or r.width or r[3]
+        h = r.h or r.H or r.height or r[4]
+    end)
+    x, y = tonumber(x), tonumber(y)
+    if x == nil or y == nil then
+        return nil
+    end
+    return x, y, tonumber(w), tonumber(h)
+end
+
+--- Move the popup next to where the screen was tapped / clicked (the
+--- cursor position) instead of the screen centre. Right of the cursor,
+--- or left of it when there is no room, and kept fully on screen.
+function lc.place_near_cursor(base, overlay, w, h)
+    local ok, err = pcall(function()
+        local mx, my = lc.rect_numbers(MouseObj().AbsRect)
+        if mx == nil then
+            error("no cursor position")
+        end
+        local ox, oy, ow, oh = lc.rect_numbers(overlay.AbsRect)
+        ox, oy = ox or 0, oy or 0
+        ow, oh = ow or 1920, oh or 1080
+        mx, my = mx - ox, my - oy
+        local gap = 30
+        local x = mx + gap
+        if x + w > ow then
+            x = mx - gap - w
+        end
+        local y = my - h / 2
+        x = math.max(0, math.min(x, ow - w))
+        y = math.max(0, math.min(y, oh - h))
+        pcall(function()
+            base.AlignmentH = "Left"
+        end)
+        pcall(function()
+            base.AlignmentV = "Top"
+        end)
+        base.X = math.floor(x)
+        base.Y = math.floor(y)
+        Printf(
+            "ResolumeControlPanel: fader popup at %d,%d (cursor %d,%d)",
+            math.floor(x),
+            math.floor(y),
+            math.floor(mx),
+            math.floor(my)
+        )
+    end)
+    if not ok then
+        Printf("ResolumeControlPanel: fader popup stays centred (%s)", tostring(err))
+    end
+end
+
 function lc.open_fader_dialog(scope, kind)
     local current = lc.get_level(scope, kind)
 
@@ -3976,6 +4045,7 @@ function lc.open_fader_dialog(scope, kind)
         base.Name = "ResArena Fader Control"
         base.W = 260
         base.H = 620
+        lc.place_near_cursor(base, overlay, 260, 620)
         base.Columns = 1
         base.Rows = 2
         base[1][1].SizePolicy = "Fixed"
@@ -4067,6 +4137,210 @@ function lc.open_fader_dialog(scope, kind)
         lc.queue_level(scope, kind, n / 100)
     end
     return false
+end
+
+------------------------------------------------------------------------
+-- Uninstall (Kaldır): delete everything this plugin created, and nothing
+-- else. Objects are matched by the exact names the plugin gives them.
+------------------------------------------------------------------------
+
+lc.OWN_MACRO_PATTERNS = {
+    "^Res_Sync$", "^Res_PollOn$", "^Res_PollOff$", "^Res_Interval$", "^Res_TrigToggle$",
+    "^Res_Clip_L%d+C%d+$", "^Res_ClearAll$", "^Res_Bypass$", "^Res_GrandMaster$",
+    "^Res_L%d+_Clear$", "^Res_L%d+_[MAV]$",
+    "^Res_Rec%d+$", "^Res_Play%d+$", "^Res_Scene%d+$",
+}
+lc.OWN_LAYOUT_NAMES = { "ResolumeControlPanel", "MA3ArenaDeck" }
+
+function lc.is_own_macro_name(name)
+    for _, pattern in ipairs(lc.OWN_MACRO_PATTERNS) do
+        if name:find(pattern) then
+            return true
+        end
+    end
+    return false
+end
+
+--- Slots in `pool` whose object name passes `match(name)`.
+function lc.find_own(pool, match)
+    local found = {}
+    if pool == nil then
+        return found
+    end
+    local count = 0
+    pcall(function()
+        count = tonumber(pool:Count()) or 0
+    end)
+    for i = 1, count do
+        local obj = pool[i]
+        if pool_object_valid(obj) then
+            local name = object_name(obj)
+            if name ~= nil and match(name) then
+                found[#found + 1] = { index = i, name = name }
+            end
+        end
+    end
+    return found
+end
+
+function lc.collect_own_objects()
+    local own_layout_names = { [LAYOUT_NAME] = true }
+    for _, n in ipairs(lc.OWN_LAYOUT_NAMES) do
+        own_layout_names[n] = true
+    end
+    local legacy = {}
+    for _, n in ipairs(lc.LEGACY_APPEARANCES) do
+        legacy[n] = true
+    end
+    return {
+        layouts = lc.find_own(get_layouts_pool(), function(name)
+            return own_layout_names[name] == true
+        end),
+        macros = lc.find_own(DataPool().Macros, lc.is_own_macro_name),
+        appearances = lc.find_own(get_appearances_pool(), function(name)
+            return name:find("^Res_%d+$") ~= nil or name:find("^ResP_%d+$") ~= nil or legacy[name] == true
+        end),
+        images = lc.find_own(get_images_pool(), function(name)
+            return name:find("^Res_%d+$") ~= nil
+        end),
+    }
+end
+
+function lc.delete_slot(pool, index, cmd)
+    if pool_object_valid(pool[index]) then
+        pcall(function()
+            pool:Delete(index)
+        end)
+    end
+    if pool_object_valid(pool[index]) then
+        pcall(function()
+            Cmd(cmd)
+        end)
+    end
+end
+
+--- Every ResArena_ GlobalVar the plugin may have written.
+function lc.delete_global_vars()
+    local keys = {
+        "Host", "Port", "LayoutIndex", "LayoutName", "ImageStart", "AppearanceStart",
+        "MacroStart", "OnlyWithThumbnail", "FetchThumbnails", "HighlightPreviewing",
+        "PollInterval", "Monitor", "MonitorOwner", "Trigger", "Fire", "Action", "Bypassed",
+    }
+    for n = 1, lc.SCENE_COUNT do
+        keys[#keys + 1] = "Scene" .. n
+    end
+    for scope = 0, 64 do
+        keys[#keys + 1] = "VolR_" .. scope
+        for _, kind in ipairs({ "master", "audio", "video" }) do
+            keys[#keys + 1] = string.format("Lvl_%d_%s", scope, kind)
+        end
+    end
+    for _, key in ipairs(keys) do
+        pcall(function()
+            DelVar(GlobalVars(), CFG_PREFIX .. key)
+        end)
+    end
+end
+
+function lc.run_uninstall(display_handle)
+    load_config()
+    local own = lc.collect_own_objects()
+    local summary = string.format(
+        "%d layout, %d macro, %d appearance, %d image\n"
+            .. "and the thumbnail files and ResArena_ settings will be deleted.\n"
+            .. "Nothing else in the show is touched.",
+        #own.layouts,
+        #own.macros,
+        #own.appearances,
+        #own.images
+    )
+    local options = {
+        title = "ResolumeControlPanel",
+        message = summary,
+        commands = {
+            { value = 1, name = "Kald\196\177r" },
+            { value = 0, name = "\196\176ptal" },
+        },
+    }
+    if display_handle ~= nil then
+        options.display = display_handle
+    end
+    local ok, result = pcall(MessageBox, options)
+    local cmd = ok and type(result) == "table" and tonumber(result.result) or 0
+    if cmd ~= 1 then
+        Printf("ResolumeControlPanel: uninstall cancelled")
+        return
+    end
+
+    set_monitor_flag(false)
+
+    local layouts = get_layouts_pool()
+    for i = #own.layouts, 1, -1 do
+        local idx = own.layouts[i].index
+        lc.delete_slot(layouts, idx, string.format("Delete Layout %d /NoConfirmation", idx))
+    end
+    local macros = DataPool().Macros
+    for i = #own.macros, 1, -1 do
+        local idx = own.macros[i].index
+        lc.delete_slot(macros, idx, string.format("Delete Macro %d /NoConfirmation", idx))
+    end
+    for i = #own.appearances, 1, -1 do
+        lc.delete_appearance(own.appearances[i].index)
+    end
+    local images = get_images_pool()
+    local lib = images_library_path()
+    for i = #own.images, 1, -1 do
+        delete_image_slot(images, own.images[i].index)
+        if lib ~= nil and lib ~= "" then
+            local png = path_join(lib, own.images[i].name .. ".png")
+            pcall(os.remove, png)
+            pcall(os.remove, png .. ".xml")
+        end
+    end
+    lc.delete_global_vars()
+
+    local done = string.format(
+        "ResolumeControlPanel removed: %d layout, %d macro, %d appearance, %d image.",
+        #own.layouts,
+        #own.macros,
+        #own.appearances,
+        #own.images
+    )
+    Printf("%s", done)
+    pcall(MessageBox, {
+        title = "ResolumeControlPanel",
+        message = done .. "\nYou can now delete the plugin from the Plugin pool.",
+        commands = { { value = 1, name = "OK" } },
+        display = display_handle,
+    })
+end
+
+--- First screen when the plugin is tapped in the Plugin pool.
+function lc.choose_install_or_uninstall(display_handle)
+    local options = {
+        title = "ResolumeControlPanel",
+        message = "Kur: setup and Sync.\nKald\196\177r: delete everything this plugin created.",
+        commands = {
+            { value = 1, name = "Kur" },
+            { value = 2, name = "Kald\196\177r" },
+            { value = 0, name = "\196\176ptal" },
+        },
+    }
+    if display_handle ~= nil then
+        options.display = display_handle
+    end
+    local ok, result = pcall(MessageBox, options)
+    if not ok then
+        -- No chooser on this build: fall back to the setup dialog.
+        return "install"
+    end
+    local cmd = type(result) == "table" and tonumber(result.result) or tonumber(result)
+    if cmd == 1 then
+        return "install"
+    elseif cmd == 2 then
+        return "uninstall"
+    end
+    return "cancel"
 end
 
 ------------------------------------------------------------------------
@@ -4222,7 +4496,21 @@ function Main(display_handle, argument)
         return
     end
 
-    -- Plugin pool / unknown / setup: always show configuration UI first.
+    if arg == "uninstall" then
+        lc.run_uninstall(display_handle)
+        return
+    end
+
+    -- Plugin pool: Kur (setup) / Kaldır (uninstall) first; "setup" skips it.
+    if arg ~= "setup" then
+        local choice = lc.choose_install_or_uninstall(display_handle)
+        if choice == "uninstall" then
+            lc.run_uninstall(display_handle)
+            return
+        elseif choice ~= "install" then
+            return
+        end
+    end
     local action = show_setup_dialog(display_handle)
     if action ~= "sync" then
         return

@@ -189,6 +189,8 @@ At the top, right of the COMPOSITION label, there are 5 pairs: **REC 1 / PLAY 1 
 - Run **SYNC** after you change the Resolume composition (new clips, rearranged deck).
 - Keep **POLL ON** (or **TRIG ON**) while performing if you want live highlights.
 - Image and appearance slots default from **200** upward (change them in setup). Macros start at **Macro Start** (setup, default **300**): each `Res_*` macro reuses the slot with its own name at or after that number, otherwise the next empty slot from there on. Used slots are never overwritten.
+- Tapping the plugin in the Plugin pool first asks **Kur** (setup dialog, then Sync) or **Kaldır** (uninstall). Kaldır shows how many objects it found, and after confirming deletes only what the plugin created: its layout, the `Res_*` macros, `Res_` / `ResP_` appearances, `Res_` images and their PNG files, and the `ResArena_` settings. `Plugin "ResolumeControlPanel" "setup"` opens setup directly.
+- The fader popup opens next to where you tapped (the cursor position) instead of the screen centre, when this MA3 build reports the cursor position.
 - The layout is only built at Layout Index when that slot is empty, empty of elements, or already a ResolumeControlPanel / MA3ArenaDeck layout. Otherwise SYNC stops before creating anything and says which layout is in the way.
 - If Resolume closes or stops answering while POLL ON runs, the plugin waits 1 s between tries and turns POLL off by itself after 3 polls with no answer. Tap POLL ON again once Resolume is back.
 - If sync fails, check System Monitor for HTTP errors, then verify the webserver URL in a browser from the MA3 machine.
