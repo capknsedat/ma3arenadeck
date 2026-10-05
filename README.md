@@ -173,6 +173,17 @@ Plugin "MA3ArenaDeck" "monitor"
 
 ---
 
+## Scene recorder (REC / PLAY)
+
+Under the control buttons there are 5 pairs: **REC 1 / PLAY 1 … REC 5 / PLAY 5** (macros `Res_Rec1-5`, `Res_Play1-5`). POLL ON must be running.
+
+- Tap **REC n**: recording starts (red). Tap clips, X and B buttons; each tap and its timing is stored. Tap **REC n** again to stop and save.
+- Tap **PLAY n**: the scene loops with the same order and timing until **PLAY n** is tapped again (green while playing).
+- Each saved scene is also written as macro `Res_Scene<n>` (one line per tap, Wait = time to the next tap; plays once).
+- Fader moves (M / A / V / GM) are not recorded.
+
+---
+
 ## Tips
 
 - Run **SYNC** after you change the Resolume composition (new clips, rearranged deck).

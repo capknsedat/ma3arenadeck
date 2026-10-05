@@ -25,7 +25,7 @@ local signalTable = select(3, ...)
 local myHandle = select(4, ...)
 
 -- Bump when changing runtime behavior so System Monitor proves the reload.
-local PLUGIN_VERSION = "2026-10-04q"
+local PLUGIN_VERSION = "2026-10-05r"
 
 ------------------------------------------------------------------------
 -- Configuration (defaults; overridden by GlobalVars / setup dialog)
@@ -108,6 +108,13 @@ lc.scan_cursor = {}
 -- Clip slots probed per layer per poll when no clip is known to play there.
 lc.SCAN_PER_TICK = 2
 
+-- Scene recorder: REC n records clip / X / B taps with their timing,
+-- PLAY n loops them until PLAY n is tapped again.
+lc.SCENE_COUNT = 5
+lc.SCENE_VAR = CFG_PREFIX .. "Scene"
+lc.rec = nil -- { slot, start, events }
+lc.play = nil -- { slot, start, length, events, i }
+
 -- Layer / composition controls left of the layer labels:
 --   [X] [M] [A] [V]   (one row per layer)
 --   [X] [B] [GM]      (composition row above the top layer)
@@ -139,6 +146,11 @@ local CTRL_COLOR = {
     -- Trigger mode: amber when taps fire clips
     trigger_active = { r = 255, g = 170, b = 0 },
     trigger_idle = { r = 55, g = 55, b = 60 },
+    -- Scene recorder: REC red while recording, PLAY green while looping
+    rec_active = { r = 255, g = 0, b = 0 },
+    rec_idle = { r = 110, g = 30, b = 30 },
+    play_active = { r = 0, g = 220, b = 80 },
+    play_idle = { r = 30, g = 90, b = 50 },
 }
 
 ------------------------------------------------------------------------
@@ -2406,6 +2418,12 @@ local function apply_control_chrome(element, kind, active)
     elseif kind == "sync" then
         color = CTRL_COLOR.sync
         border = 5
+    elseif kind:match("^rec%d+$") then
+        color = active and CTRL_COLOR.rec_active or CTRL_COLOR.rec_idle
+        border = active and 12 or 4
+    elseif kind:match("^play%d+$") then
+        color = active and CTRL_COLOR.play_active or CTRL_COLOR.play_idle
+        border = active and 12 or 4
     end
 
     pcall(function()
@@ -2453,6 +2471,14 @@ local function update_control_button_styles()
                 active = triggering
             elseif kind == "interval" or kind == "sync" then
                 active = true
+            else
+                local rec_n = tonumber(kind:match("^rec(%d+)$"))
+                local play_n = tonumber(kind:match("^play(%d+)$"))
+                if rec_n then
+                    active = lc.rec ~= nil and lc.rec.slot == rec_n
+                elseif play_n then
+                    active = lc.play ~= nil and lc.play.slot == play_n
+                end
             end
             apply_control_chrome(element, kind, active)
         end
@@ -2734,6 +2760,7 @@ local function process_pending_fire()
     if not layer then
         return nil
     end
+    lc.record_event("f", layer .. "," .. column)
 
     local t_post = Time()
     local ok, err = http_post(clip_connect_url(layer, column), "", 2)
@@ -2812,11 +2839,39 @@ local function add_control_buttons(layout, layer_count)
         },
     }
 
-    for i, btn in ipairs(buttons) do
-        local bx = x + ((i - 1) * (BUTTON_WIDTH + BUTTON_GAP))
+    -- Scene recorder row under the controls: REC 1, PLAY 1, REC 2, ...
+    local scene_y = y - (BUTTON_HEIGHT + BUTTON_GAP)
+    for n = 1, lc.SCENE_COUNT do
+        for _, def in ipairs({
+            { kind = "rec", label = "\226\151\143 REC " .. n, name = "Res_Rec" .. n },
+            { kind = "play", label = "\226\150\182 PLAY " .. n, name = "Res_Play" .. n },
+        }) do
+            local index = lc.macro_slot(def.name)
+            local macro = ensure_macro(index)
+            if macro then
+                macro:Set("Name", def.name)
+                write_macro_lines(macro, index, { lc.action_macro_line(def.kind .. "," .. n) })
+                buttons[#buttons + 1] = {
+                    label = def.label,
+                    macro = { index = index },
+                    note = "resolume-ctrl:" .. def.kind .. n,
+                    kind = def.kind .. n,
+                    row = 2,
+                }
+            else
+                Printf("MA3ArenaDeck: could not create Macro %d '%s'", index, def.name)
+            end
+        end
+    end
+
+    local row_count = { 0, 0 }
+    for _, btn in ipairs(buttons) do
+        local row = btn.row or 1
+        row_count[row] = row_count[row] + 1
+        local bx = x + ((row_count[row] - 1) * (BUTTON_WIDTH + BUTTON_GAP))
         local geo = {
             x = bx,
-            y = y,
+            y = row == 2 and scene_y or y,
             width = BUTTON_WIDTH,
             height = BUTTON_HEIGHT,
             text = btn.label,
@@ -3186,8 +3241,195 @@ function lc.layer_level_body(kind, value)
     return string.format('{"master":{"value":%.4f}}', value)
 end
 
+------------------------------------------------------------------------
+-- Scene recorder (REC / PLAY)
+------------------------------------------------------------------------
+
+function lc.record_event(kind, value)
+    local r = lc.rec
+    if r == nil then
+        return
+    end
+    r.events[#r.events + 1] = { t = Time() - r.start, k = kind, v = value }
+end
+
+--- "len=12.340;0.000|f|1,3;1.500|a|clear,2;..." in ResArena_Scene<n>.
+function lc.save_scene(slot, length, events)
+    local parts = { string.format("len=%.3f", length) }
+    for _, ev in ipairs(events) do
+        parts[#parts + 1] = string.format("%.3f|%s|%s", ev.t, ev.k, ev.v)
+    end
+    pcall(function()
+        SetVar(GlobalVars(), lc.SCENE_VAR .. tostring(slot), table.concat(parts, ";"))
+    end)
+end
+
+function lc.load_scene(slot)
+    local v = nil
+    pcall(function()
+        v = GetVar(GlobalVars(), lc.SCENE_VAR .. tostring(slot))
+    end)
+    if type(v) ~= "string" or v == "" then
+        return nil
+    end
+    local length = tonumber(v:match("^len=([%d%.]+)")) or 0
+    local events = {}
+    for t, k, val in v:gmatch("([%d%.]+)|(%a)|([^;]+)") do
+        events[#events + 1] = { t = tonumber(t) or 0, k = k, v = val }
+    end
+    if #events == 0 then
+        return nil
+    end
+    return length, events
+end
+
+--- Also write the scene as MA3 macro Res_Scene<n> (one line per tap, the
+--- line's Wait = time to the next tap). Like the layout buttons, it only
+--- reaches Resolume while POLL ON runs. The macro plays once.
+function lc.write_scene_macro(slot, length, events)
+    local name = "Res_Scene" .. tostring(slot)
+    local index = lc.macro_slot(name)
+    local macro = ensure_macro(index)
+    if macro == nil then
+        Printf("MA3ArenaDeck: could not create Macro %d '%s'", index, name)
+        return
+    end
+    macro:Set("Name", name)
+    local children = macro:Children()
+    for i = #children, 1, -1 do
+        macro:Delete(i)
+    end
+    for i, ev in ipairs(events) do
+        local command
+        if ev.k == "f" then
+            command = string.format('Lua "SetVar(GlobalVars(), \'%s\', \'%s\')"', FIRE_VAR, ev.v)
+        else
+            command = lc.action_macro_line(ev.v)
+        end
+        local next_t = events[i + 1] and events[i + 1].t or length
+        local wait = math.max(0, next_t - ev.t)
+        local line = macro:Acquire()
+        if line then
+            pcall(function()
+                line:Set("Command", command)
+            end)
+            pcall(function()
+                line:Set("Wait", string.format("%.2f", wait))
+            end)
+        end
+    end
+    Printf("MA3ArenaDeck: scene %d written to Macro %d '%s' (%d taps)", slot, index, name, #events)
+end
+
+function lc.stop_rec()
+    local r = lc.rec
+    if r == nil then
+        return
+    end
+    lc.rec = nil
+    local length = Time() - r.start
+    if #r.events == 0 then
+        Printf("MA3ArenaDeck: REC %d stopped, nothing tapped; old scene kept", r.slot)
+        return
+    end
+    lc.save_scene(r.slot, length, r.events)
+    lc.write_scene_macro(r.slot, length, r.events)
+    Printf("MA3ArenaDeck: REC %d saved (%d taps, %.2fs loop)", r.slot, #r.events, length)
+end
+
+function lc.toggle_rec(slot)
+    local was = lc.rec and lc.rec.slot
+    lc.stop_rec()
+    if was ~= slot then
+        if lc.play and lc.play.slot == slot then
+            lc.play = nil
+        end
+        lc.rec = { slot = slot, start = Time(), events = {} }
+        Printf("MA3ArenaDeck: REC %d started", slot)
+    end
+    update_control_button_styles()
+end
+
+function lc.toggle_play(slot)
+    local was = lc.play and lc.play.slot
+    lc.play = nil
+    if was ~= slot then
+        if lc.rec and lc.rec.slot == slot then
+            lc.stop_rec()
+        end
+        local length, events = lc.load_scene(slot)
+        if not length then
+            Printf("MA3ArenaDeck: scene %d is empty, record it with REC %d first", slot, slot)
+        else
+            -- A loop never runs shorter than its last tap.
+            length = math.max(length, events[#events].t + 0.1)
+            lc.play = { slot = slot, start = Time(), length = length, events = events, i = 1 }
+            Printf("MA3ArenaDeck: PLAY %d looping (%d taps, %.2fs)", slot, #events, length)
+        end
+    else
+        Printf("MA3ArenaDeck: PLAY %d stopped", slot)
+    end
+    update_control_button_styles()
+end
+
+function lc.run_scene_event(ev)
+    if ev.k == "f" then
+        local layer, column = ev.v:match("^(%d+),(%d+)$")
+        if layer and http_post(clip_connect_url(layer, column), "", 2) then
+            apply_fired_highlight(tonumber(layer), tonumber(column))
+        end
+    else
+        lc.run_control_action(ev.v)
+    end
+end
+
+--- Called from the poll loop: send every scene tap that is due.
+function lc.play_tick()
+    local p = lc.play
+    if p == nil then
+        return false
+    end
+    local now = Time() - p.start
+    if now > p.length * 2 then
+        -- The loop was stalled (e.g. a slow poll); restart instead of bursting.
+        p.start = Time()
+        p.i = 1
+        now = 0
+    end
+    local any = false
+    while lc.play == p do
+        local ev = p.events[p.i]
+        if ev == nil then
+            if now < p.length then
+                break
+            end
+            p.start = p.start + p.length
+            now = now - p.length
+            p.i = 1
+        elseif ev.t <= now then
+            p.i = p.i + 1
+            lc.run_scene_event(ev)
+            any = true
+        else
+            break
+        end
+    end
+    return any
+end
+
 --- Run one queued control action. Returns true when Resolume accepted it.
 function lc.run_control_action(action)
+    local rec_n = tonumber(action:match("^rec,(%d+)$"))
+    if rec_n then
+        lc.toggle_rec(rec_n)
+        return true
+    end
+    local play_n = tonumber(action:match("^play,(%d+)$"))
+    if play_n then
+        lc.toggle_play(play_n)
+        return true
+    end
+
     local t0 = Time()
     local ok, err, what
 
@@ -3268,6 +3510,9 @@ function lc.process_pending_actions()
     for i, action in ipairs(actions) do
         local key = action:match("^(lvl,%d+,%a+),")
         if not key or last_for[key] == i then
+            if action == "clearall" or action == "bypass" or action:match("^clear,%d+$") then
+                lc.record_event("a", action)
+            end
             if lc.run_control_action(action) then
                 any = true
             end
@@ -3280,6 +3525,9 @@ end
 --- queued layer / composition controls. Returns true when something ran.
 local function handle_pending_fire()
     local acted = lc.process_pending_actions()
+    if lc.play_tick() then
+        acted = true
+    end
     local layer, column = process_pending_fire()
     if not layer then
         return acted
