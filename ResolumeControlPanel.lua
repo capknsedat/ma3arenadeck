@@ -1,4 +1,5 @@
--- Plugin: MA3ArenaDeck (Resolume composition grid for grandMA3)
+-- Plugin: ResolumeControlPanel (Resolume composition grid for grandMA3)
+-- Based on MA3ArenaDeck by Simon Kotting.
 -- Copyright (c) 2026 Simon Kotting — MIT License (see LICENSE)
 -- Fetches the current Resolume composition, builds a layout grid, imports
 -- clip thumbnails as Images/Appearances, and can poll connected state to
@@ -25,7 +26,7 @@ local signalTable = select(3, ...)
 local myHandle = select(4, ...)
 
 -- Bump when changing runtime behavior so System Monitor proves the reload.
-local PLUGIN_VERSION = "2026-10-05s"
+local PLUGIN_VERSION = "2026-10-05t"
 
 ------------------------------------------------------------------------
 -- Configuration (defaults; overridden by GlobalVars / setup dialog)
@@ -47,7 +48,7 @@ local RESOLUME_PORT = 8080
 local ONLY_WITH_THUMBNAIL = false
 
 local LAYOUT_INDEX = 1
-local LAYOUT_NAME = "MA3ArenaDeck"
+local LAYOUT_NAME = "ResolumeControlPanel"
 
 local CELL_WIDTH = 160
 local CELL_HEIGHT = 90
@@ -89,8 +90,9 @@ local LAYER_BORDER_R = 0
 local LAYER_BORDER_G = 0
 local LAYER_BORDER_B = 0
 
--- Macros have no start slot: each is found by its own name, else written
--- to the first empty macro slot (see lc.macro_slot). Never a used slot.
+-- Macros start at the setup dialog's Macro Start (lc.MACRO_START): each is
+-- found by its own name from there on, else written to the next empty slot
+-- (see lc.macro_slot). A used slot is never overwritten.
 local BUTTON_WIDTH = 128
 local BUTTON_HEIGHT = 60
 local BUTTON_GAP = 12
@@ -100,6 +102,18 @@ local BUTTON_ROW_OFFSET = 40
 -- Helpers / settings for layer controls and border colours live in one
 -- table: the main chunk is at the 200-local limit.
 local lc = {}
+lc.MACRO_START = 300
+-- Resolume gone (closed / unreachable): after this many polls in a row
+-- without any answer, POLL stops by itself instead of retrying forever.
+lc.OFFLINE_STOP_AFTER = 3
+-- Pause after a failed poll, so a dead connection is not hammered.
+lc.OFFLINE_RETRY_SEC = 1.0
+
+--- True when no HTTP answer came back at all (connection refused, timeout,
+--- closed): Resolume is not running or not reachable.
+function lc.is_conn_error(err)
+    return type(err) == "string" and err:find("^HTTP request failed") ~= nil
+end
 -- clip id -> playing as last drawn by this monitor (so a redraw only
 -- happens on a real change, independent of reading the note back).
 lc.play_cache = {}
@@ -169,7 +183,7 @@ local function ensure_deps()
 
     if not (ok_http and ok_ltn12 and ok_json) then
         Printf(
-            "MA3ArenaDeck ERROR: missing Lua modules (http=%s, ltn12=%s, json=%s)",
+            "ResolumeControlPanel ERROR: missing Lua modules (http=%s, ltn12=%s, json=%s)",
             tostring(ok_http),
             tostring(ok_ltn12),
             tostring(ok_json)
@@ -247,6 +261,7 @@ local function load_config()
     IMAGE_START_INDEX = tonumber(cfg_get("ImageStart", IMAGE_START_INDEX)) or IMAGE_START_INDEX
     APPEARANCE_START_INDEX = tonumber(cfg_get("AppearanceStart", APPEARANCE_START_INDEX))
         or APPEARANCE_START_INDEX
+    lc.MACRO_START = math.max(1, math.floor(tonumber(cfg_get("MacroStart", lc.MACRO_START)) or lc.MACRO_START))
     ONLY_WITH_THUMBNAIL = cfg_get_bool("OnlyWithThumbnail", ONLY_WITH_THUMBNAIL)
     FETCH_THUMBNAILS = cfg_get_bool("FetchThumbnails", FETCH_THUMBNAILS)
     HIGHLIGHT_PREVIEWING = cfg_get_bool("HighlightPreviewing", HIGHLIGHT_PREVIEWING)
@@ -260,6 +275,7 @@ local function save_config()
     cfg_set("LayoutName", LAYOUT_NAME)
     cfg_set("ImageStart", tostring(IMAGE_START_INDEX))
     cfg_set("AppearanceStart", tostring(APPEARANCE_START_INDEX))
+    cfg_set("MacroStart", tostring(lc.MACRO_START))
     cfg_set("OnlyWithThumbnail", ONLY_WITH_THUMBNAIL and "1" or "0")
     cfg_set("FetchThumbnails", FETCH_THUMBNAILS and "1" or "0")
     cfg_set("HighlightPreviewing", HIGHLIGHT_PREVIEWING and "1" or "0")
@@ -294,10 +310,10 @@ end
 --- Returns: "sync" | "save" | "cancel"
 local function show_setup_dialog(display_handle)
     load_config()
-    Printf("MA3ArenaDeck: opening setup dialog...")
+    Printf("ResolumeControlPanel: opening setup dialog...")
 
     local options = {
-        title = "MA3ArenaDeck Setup",
+        title = "ResolumeControlPanel",
         message = "Set Resolume host/port and MA3 pool slots, then Sync.\n\n"
             .. "Note: Resolume's default webserver port is 8080, which grandMA3 "
             .. "also uses by default. If both run on the same machine, change "
@@ -336,7 +352,13 @@ local function show_setup_dialog(display_handle)
                 vkPlugin = "TextInputNumOnly",
             },
             {
-                name = "07 Poll Interval (s)",
+                name = "07 Macro Start",
+                value = tostring(lc.MACRO_START),
+                whiteFilter = "0123456789",
+                vkPlugin = "TextInputNumOnly",
+            },
+            {
+                name = "08 Poll Interval (s)",
                 value = string.format("%.2f", get_poll_interval()),
                 whiteFilter = "0123456789.",
                 vkPlugin = "TextInputNumOnly",
@@ -356,10 +378,10 @@ local function show_setup_dialog(display_handle)
 
     local ok, result = pcall(MessageBox, options)
     if not ok then
-        Printf("MA3ArenaDeck: MessageBox failed: %s", tostring(result))
+        Printf("ResolumeControlPanel: MessageBox failed: %s", tostring(result))
         -- Retry with a minimal dialog (some builds dislike states/inputs combo).
         ok, result = pcall(MessageBox, {
-            title = "MA3ArenaDeck Setup",
+            title = "ResolumeControlPanel",
             message = string.format(
                 "Host=%s  Port=%d  Layout=%d\nEdit values in code/GlobalVars if this dialog is limited.\n\nContinue with Sync?",
                 RESOLUME_HOST,
@@ -372,7 +394,7 @@ local function show_setup_dialog(display_handle)
             },
         })
         if not ok or type(result) ~= "table" then
-            Printf("MA3ArenaDeck: setup dialog unavailable")
+            Printf("ResolumeControlPanel: setup dialog unavailable")
             return "cancel"
         end
         local cmd = tonumber(result.result)
@@ -386,11 +408,11 @@ local function show_setup_dialog(display_handle)
     end
 
     if type(result) ~= "table" then
-        Printf("MA3ArenaDeck: MessageBox returned %s", type(result))
+        Printf("ResolumeControlPanel: MessageBox returned %s", type(result))
         return "cancel"
     end
     if result.success == false then
-        Printf("MA3ArenaDeck: setup cancelled")
+        Printf("ResolumeControlPanel: setup cancelled")
         return "cancel"
     end
 
@@ -407,7 +429,7 @@ local function show_setup_dialog(display_handle)
     end
     cmd = cmd or 0
     if cmd == 0 then
-        Printf("MA3ArenaDeck: setup cancelled")
+        Printf("ResolumeControlPanel: setup cancelled")
         return "cancel"
     end
 
@@ -419,8 +441,10 @@ local function show_setup_dialog(display_handle)
         or IMAGE_START_INDEX
     APPEARANCE_START_INDEX = tonumber(mb_input(result, "06 Appearance Start", APPEARANCE_START_INDEX))
         or APPEARANCE_START_INDEX
+    lc.MACRO_START = math.max(1, math.floor(tonumber(mb_input(result, "07 Macro Start", lc.MACRO_START))
+        or lc.MACRO_START))
     POLL_INTERVAL_SEC = nearest_poll_interval(
-        mb_input(result, "07 Poll Interval (s)", POLL_INTERVAL_SEC)
+        mb_input(result, "08 Poll Interval (s)", POLL_INTERVAL_SEC)
     )
     FETCH_THUMBNAILS = mb_state(result, "Fetch thumbnails", FETCH_THUMBNAILS)
     ONLY_WITH_THUMBNAIL = mb_state(result, "Only clips with thumbnail", ONLY_WITH_THUMBNAIL)
@@ -428,7 +452,7 @@ local function show_setup_dialog(display_handle)
 
     save_config()
     Printf(
-        "MA3ArenaDeck: config saved (%s:%d, Layout %d, poll %.2fs)",
+        "ResolumeControlPanel: config saved (%s:%d, Layout %d, poll %.2fs)",
         RESOLUME_HOST,
         RESOLUME_PORT,
         LAYOUT_INDEX,
@@ -804,7 +828,7 @@ local function fetch_clip_connected_state(meta, timeout_sec)
             timeout_sec or 1.0
         )
     end
-    if not raw then
+    if not raw and not lc.is_conn_error(err) then
         raw, err = http_get(
             clip_by_id_url(meta.id),
             "application/json",
@@ -860,6 +884,11 @@ local function collect_connected_states_by_clips(clip_metas, timeout_sec, should
         if not state then
             failures = failures + 1
             last_err = err
+            if lc.is_conn_error(err) then
+                -- No answer at all: Resolume is gone, so skip the rest of
+                -- this scan instead of waiting on every clip in turn.
+                return nil, err
+            end
             state = meta.playing and "Connected" or "Disconnected"
         end
         states[tostring(meta.id)] = state
@@ -1087,12 +1116,13 @@ local function ensure_macro(index)
 end
 
 --- Macro slots by name: one scan of the Macros pool per run, then each
---- plugin macro reuses the slot already carrying its name, or takes the
---- first empty slot. A slot holding any other macro is never touched.
+--- plugin macro reuses the slot already carrying its name at or after
+--- Macro Start, or takes the next empty slot from Macro Start on. A slot
+--- holding any other macro is never touched.
 function lc.scan_macro_slots()
     lc.macro_by_name = {}
     lc.macro_used = {}
-    lc.macro_next_free = 1
+    lc.macro_next_free = lc.MACRO_START
     local macros = DataPool().Macros
     if macros == nil then
         return
@@ -1101,7 +1131,7 @@ function lc.scan_macro_slots()
     pcall(function()
         count = tonumber(macros:Count()) or 0
     end)
-    for i = 1, count do
+    for i = lc.MACRO_START, count do
         local obj = macros[i]
         if pool_object_valid(obj) then
             lc.macro_used[i] = true
@@ -1308,7 +1338,7 @@ local function import_image_to_pool(clip, png_data)
     end)
 
     Printf(
-        "MA3ArenaDeck: image import Image %d.%d via %s (%d bytes)",
+        "ResolumeControlPanel: image import Image %d.%d via %s (%d bytes)",
         IMAGE_POOL,
         image_index,
         tostring(method),
@@ -1479,7 +1509,7 @@ local function set_element_border_color(element, r, g, b)
         then
             border_color_way = i
             Printf(
-                "MA3ArenaDeck: border colour via %s (%s) -> '%s'",
+                "ResolumeControlPanel: border colour via %s (%s) -> '%s'",
                 way.prop,
                 way.fmt,
                 tostring(lc.read_element_prop(element, way.prop))
@@ -1493,7 +1523,7 @@ local function set_element_border_color(element, r, g, b)
     if not border_color_logged then
         border_color_logged = true
         Printf(
-            "MA3ArenaDeck: border colour not confirmed (BorderColor was '%s', now '%s'); using appearance colours",
+            "ResolumeControlPanel: border colour not confirmed (BorderColor was '%s', now '%s'); using appearance colours",
             tostring(before),
             tostring(lc.read_element_prop(element, "BorderColor"))
         )
@@ -1657,7 +1687,7 @@ local function sync_thumbnails(clips)
     local skip_count = 0
     local fail_count = 0
 
-    Printf("MA3ArenaDeck: importing thumbnails / appearances...")
+    Printf("ResolumeControlPanel: importing thumbnails / appearances...")
 
     for _, clip in ipairs(clips) do
         local media, err
@@ -1697,7 +1727,7 @@ local function sync_thumbnails(clips)
     end
 
     Printf(
-        "MA3ArenaDeck: media done (ok=%d no-thumb=%d fail=%d)",
+        "ResolumeControlPanel: media done (ok=%d no-thumb=%d fail=%d)",
         ok_count,
         skip_count,
         fail_count
@@ -1852,7 +1882,7 @@ local function ensure_control_macros()
         def.index = lc.macro_slot(def.name)
         local macro = ensure_macro(def.index)
         if macro == nil then
-            Printf("MA3ArenaDeck: could not create Macro %d '%s'", def.index, def.name)
+            Printf("ResolumeControlPanel: could not create Macro %d '%s'", def.index, def.name)
             return nil, string.format("Could not create Macro %d", def.index)
         end
         macro:Set("Name", def.name)
@@ -1863,7 +1893,7 @@ local function ensure_control_macros()
             line_count = #macro:Children()
         end)
         Printf(
-            "MA3ArenaDeck: Macro %d '%s' ready (%d lines)",
+            "ResolumeControlPanel: Macro %d '%s' ready (%d lines)",
             def.index,
             def.name,
             line_count
@@ -1904,7 +1934,7 @@ local function ensure_clip_trigger_macros(clips)
         local macro = ensure_macro(macro_index)
         if macro == nil then
             Printf(
-                "MA3ArenaDeck: could not create trigger Macro %d (clip L%d C%d)",
+                "ResolumeControlPanel: could not create trigger Macro %d (clip L%d C%d)",
                 macro_index,
                 tonumber(clip.layer) or 1,
                 tonumber(clip.column) or 1
@@ -1928,7 +1958,7 @@ local function ensure_clip_trigger_macros(clips)
     end
 
     Printf(
-        "MA3ArenaDeck: clip trigger macros ready (%d)",
+        "ResolumeControlPanel: clip trigger macros ready (%d)",
         #clips
     )
     return map
@@ -2036,7 +2066,7 @@ function lc.ensure_layer_control_macros(grid)
     for _, def in ipairs(defs) do
         local macro = ensure_macro(def.macro_index)
         if macro == nil then
-            Printf("MA3ArenaDeck: could not create control Macro %d", def.macro_index)
+            Printf("ResolumeControlPanel: could not create control Macro %d", def.macro_index)
             def.macro_index = nil
         else
             macro:Set("Name", def.name)
@@ -2044,7 +2074,7 @@ function lc.ensure_layer_control_macros(grid)
         end
     end
     Printf(
-        "MA3ArenaDeck: layer control macros ready (%d)",
+        "ResolumeControlPanel: layer control macros ready (%d)",
         #defs
     )
     return defs
@@ -2060,7 +2090,7 @@ local function print_clips(clips, composition, grid)
         comp_name = param_value(composition.name, "unknown")
     end
 
-    Printf("MA3ArenaDeck ----------------------------------------")
+    Printf("ResolumeControlPanel ----------------------------------------")
     Printf("Host: %s:%d", RESOLUME_HOST, RESOLUME_PORT)
     Printf("Composition: %s", tostring(comp_name))
     Printf("Available clips: %d", #clips)
@@ -2173,7 +2203,7 @@ function lc.delete_legacy_appearances()
         end
     end
     if removed > 0 then
-        Printf("MA3ArenaDeck: removed %d old button appearances", removed)
+        Printf("ResolumeControlPanel: removed %d old button appearances", removed)
     end
 end
 
@@ -2257,7 +2287,7 @@ function lc.dump_element_props(element)
             end
         end)
     end
-    Printf("MA3ArenaDeck: element props: %s", table.concat(parts, " | "))
+    Printf("ResolumeControlPanel: element props: %s", table.concat(parts, " | "))
 end
 
 local function assign_appearance(element, appearance_info)
@@ -2357,7 +2387,7 @@ local function cleanup_stray_rcs_macro_elements(layout)
             if obj_name:find("^Res_") ~= nil or obj_name:find("^MAD_") ~= nil then
                 layout:Delete(i)
                 removed = removed + 1
-                Printf("MA3ArenaDeck: removed stray '%s' from layout", obj_name)
+                Printf("ResolumeControlPanel: removed stray '%s' from layout", obj_name)
             end
         end
     end
@@ -2521,7 +2551,7 @@ local function place_control_macro(layout, macro_index, geo)
 
     local macro = DataPool().Macros[macro_index]
     if macro == nil then
-        Printf("MA3ArenaDeck: Macro %d missing", macro_index)
+        Printf("ResolumeControlPanel: Macro %d missing", macro_index)
         return false
     end
 
@@ -2566,7 +2596,7 @@ local function place_control_macro(layout, macro_index, geo)
 
     if target == nil then
         Printf(
-            "MA3ArenaDeck: Assign Macro %d did not create a layout element",
+            "ResolumeControlPanel: Assign Macro %d did not create a layout element",
             macro_index
         )
         return false
@@ -2587,7 +2617,7 @@ local function place_control_macro(layout, macro_index, geo)
     end)
 
     Printf(
-        "MA3ArenaDeck: button Macro %d -> Layout %d.%s (%s)",
+        "ResolumeControlPanel: button Macro %d -> Layout %d.%s (%s)",
         macro_index,
         LAYOUT_INDEX,
         tostring(child_index or "?"),
@@ -2732,12 +2762,12 @@ local function toggle_trigger_mode()
     local n = apply_trigger_mode_to_layout(enabled)
     update_control_button_styles()
     Printf(
-        "MA3ArenaDeck: trigger mode %s (%d clip elements)",
+        "ResolumeControlPanel: trigger mode %s (%d clip elements)",
         enabled and "ON" or "OFF",
         n
     )
     pcall(function()
-        Echo(string.format("MA3ArenaDeck: TRIG %s", enabled and "ON" or "OFF"))
+        Echo(string.format("ResolumeControlPanel: TRIG %s", enabled and "ON" or "OFF"))
     end)
     return enabled
 end
@@ -2767,7 +2797,7 @@ local function process_pending_fire()
     if ok then
         local waited = tonumber(tapped_at) and (t_post - tonumber(tapped_at)) or -1
         Printf(
-            "MA3ArenaDeck: triggered L%d C%d (tap waited %.2fs, POST %.2fs)",
+            "ResolumeControlPanel: triggered L%d C%d (tap waited %.2fs, POST %.2fs)",
             tonumber(layer) or 0,
             tonumber(column) or 0,
             waited,
@@ -2776,7 +2806,7 @@ local function process_pending_fire()
         return tonumber(layer), tonumber(column)
     end
 
-    Printf("MA3ArenaDeck: trigger FAILED (%s)", tostring(err))
+    Printf("ResolumeControlPanel: trigger FAILED (%s)", tostring(err))
     return nil
 end
 
@@ -2790,7 +2820,7 @@ local function fire_resolume_clip(layer, column, clip_id)
         ok, err = http_post(clip_connect_url(layer, column), "", 2)
         if ok then
             Printf(
-                "MA3ArenaDeck: triggered L%d C%d",
+                "ResolumeControlPanel: triggered L%d C%d",
                 tonumber(layer) or 0,
                 tonumber(column) or 0
             )
@@ -2801,12 +2831,12 @@ local function fire_resolume_clip(layer, column, clip_id)
     if clip_id then
         ok, err = http_post(clip_connect_by_id_url(clip_id), "", 2)
         if ok then
-            Printf("MA3ArenaDeck: triggered clip id %s", tostring(clip_id))
+            Printf("ResolumeControlPanel: triggered clip id %s", tostring(clip_id))
             return true
         end
     end
 
-    Printf("MA3ArenaDeck: trigger FAILED (%s)", tostring(err))
+    Printf("ResolumeControlPanel: trigger FAILED (%s)", tostring(err))
     return false
 end
 
@@ -2861,7 +2891,7 @@ local function add_control_buttons(layout, layer_count)
                     row = 2,
                 }
             else
-                Printf("MA3ArenaDeck: could not create Macro %d '%s'", index, def.name)
+                Printf("ResolumeControlPanel: could not create Macro %d '%s'", index, def.name)
             end
         end
     end
@@ -2884,7 +2914,7 @@ local function add_control_buttons(layout, layer_count)
         if place_control_macro(layout, btn.macro.index, geo) then
             created = created + 1
         else
-            Printf("MA3ArenaDeck: failed to wire button '%s'", btn.label)
+            Printf("ResolumeControlPanel: failed to wire button '%s'", btn.label)
         end
     end
 
@@ -3293,7 +3323,7 @@ function lc.write_scene_macro(slot, length, events)
     local index = lc.macro_slot(name)
     local macro = ensure_macro(index)
     if macro == nil then
-        Printf("MA3ArenaDeck: could not create Macro %d '%s'", index, name)
+        Printf("ResolumeControlPanel: could not create Macro %d '%s'", index, name)
         return
     end
     macro:Set("Name", name)
@@ -3320,7 +3350,7 @@ function lc.write_scene_macro(slot, length, events)
             end)
         end
     end
-    Printf("MA3ArenaDeck: scene %d written to Macro %d '%s' (%d taps)", slot, index, name, #events)
+    Printf("ResolumeControlPanel: scene %d written to Macro %d '%s' (%d taps)", slot, index, name, #events)
 end
 
 function lc.stop_rec()
@@ -3331,12 +3361,12 @@ function lc.stop_rec()
     lc.rec = nil
     local length = Time() - r.start
     if #r.events == 0 then
-        Printf("MA3ArenaDeck: REC %d stopped, nothing tapped; old scene kept", r.slot)
+        Printf("ResolumeControlPanel: REC %d stopped, nothing tapped; old scene kept", r.slot)
         return
     end
     lc.save_scene(r.slot, length, r.events)
     lc.write_scene_macro(r.slot, length, r.events)
-    Printf("MA3ArenaDeck: REC %d saved (%d taps, %.2fs loop)", r.slot, #r.events, length)
+    Printf("ResolumeControlPanel: REC %d saved (%d taps, %.2fs loop)", r.slot, #r.events, length)
 end
 
 function lc.toggle_rec(slot)
@@ -3347,7 +3377,7 @@ function lc.toggle_rec(slot)
             lc.play = nil
         end
         lc.rec = { slot = slot, start = Time(), events = {} }
-        Printf("MA3ArenaDeck: REC %d started", slot)
+        Printf("ResolumeControlPanel: REC %d started", slot)
     end
     update_control_button_styles()
 end
@@ -3361,15 +3391,15 @@ function lc.toggle_play(slot)
         end
         local length, events = lc.load_scene(slot)
         if not length then
-            Printf("MA3ArenaDeck: scene %d is empty, record it with REC %d first", slot, slot)
+            Printf("ResolumeControlPanel: scene %d is empty, record it with REC %d first", slot, slot)
         else
             -- A loop never runs shorter than its last tap.
             length = math.max(length, events[#events].t + 0.1)
             lc.play = { slot = slot, start = Time(), length = length, events = events, i = 1 }
-            Printf("MA3ArenaDeck: PLAY %d looping (%d taps, %.2fs)", slot, #events, length)
+            Printf("ResolumeControlPanel: PLAY %d looping (%d taps, %.2fs)", slot, #events, length)
         end
     else
-        Printf("MA3ArenaDeck: PLAY %d stopped", slot)
+        Printf("ResolumeControlPanel: PLAY %d stopped", slot)
     end
     update_control_button_styles()
 end
@@ -3472,16 +3502,16 @@ function lc.run_control_action(action)
                 lc.update_level_display(L, kind, tonumber(step) or 0)
             end
         else
-            Printf("MA3ArenaDeck: unknown control action '%s'", tostring(action))
+            Printf("ResolumeControlPanel: unknown control action '%s'", tostring(action))
             return false
         end
     end
 
     if ok then
-        Printf("MA3ArenaDeck: %s (%.2fs)", what, Time() - t0)
+        Printf("ResolumeControlPanel: %s (%.2fs)", what, Time() - t0)
         return true
     end
-    Printf("MA3ArenaDeck: %s FAILED (%s)", tostring(what), tostring(err))
+    Printf("ResolumeControlPanel: %s FAILED (%s)", tostring(what), tostring(err))
     return false
 end
 
@@ -3663,8 +3693,8 @@ local function cycle_poll_interval()
     end
     local value = set_poll_interval(POLL_INTERVAL_OPTIONS[next_index])
     update_control_button_styles()
-    Printf("MA3ArenaDeck: poll interval -> %.2fs", value)
-    ui_echo(string.format("MA3ArenaDeck: poll interval -> %.2fs", value))
+    Printf("ResolumeControlPanel: poll interval -> %.2fs", value)
+    ui_echo(string.format("ResolumeControlPanel: poll interval -> %.2fs", value))
 end
 
 local function run_monitor_loop()
@@ -3680,7 +3710,7 @@ local function run_monitor_loop()
     update_control_button_styles()
 
     Printf(
-        "MA3ArenaDeck: POLL ON - monitor started (v%s)",
+        "ResolumeControlPanel: POLL ON - monitor started (v%s)",
         PLUGIN_VERSION
     )
     Printf(
@@ -3691,7 +3721,7 @@ local function run_monitor_loop()
         composition_url()
     )
     ui_echo(string.format(
-        "MA3ArenaDeck: POLL ON v%s (%.2fs) %s:%d",
+        "ResolumeControlPanel: POLL ON v%s (%.2fs) %s:%d",
         PLUGIN_VERSION,
         interval,
         RESOLUME_HOST,
@@ -3710,6 +3740,7 @@ local function run_monitor_loop()
     -- freezes / gets aborted, so highlights only refresh when POLL ON is tapped again.
     local tick = 0
     local last_tick_end = Time()
+    local fails_in_row = 0
     while get_monitor_flag() and still_owner() do
         tick = tick + 1
         local tick_start = Time()
@@ -3723,13 +3754,31 @@ local function run_monitor_loop()
         last_tick_end = Time()
 
         if not ok then
-            Printf("MA3ArenaDeck monitor ERROR: %s", tostring(err))
-            ui_echo(string.format("MA3ArenaDeck poll ERROR: %s", tostring(err)))
+            fails_in_row = fails_in_row + 1
+            -- Log once per outage, not every poll.
+            if fails_in_row == 1 then
+                Printf("ResolumeControlPanel monitor ERROR: %s", tostring(err))
+                ui_echo(string.format("ResolumeControlPanel poll ERROR: %s", tostring(err)))
+            end
+            if fails_in_row >= lc.OFFLINE_STOP_AFTER then
+                Printf(
+                    "ResolumeControlPanel: no answer from Resolume %s:%d in %d polls - POLL stopped. Tap POLL ON when Resolume is running again.",
+                    RESOLUME_HOST,
+                    RESOLUME_PORT,
+                    fails_in_row
+                )
+                ui_echo("ResolumeControlPanel: Resolume not reachable - POLL stopped")
+                break
+            end
         else
+            if fails_in_row > 0 then
+                Printf("ResolumeControlPanel: Resolume answering again")
+            end
+            fails_in_row = 0
             -- Always log the first few ticks so slow fetches are obvious.
             if tick <= 5 or (changed and changed > 0) or (tick % 20 == 0) then
                 Printf(
-                    "MA3ArenaDeck: poll #%d changed=%d total=%.2fs fetch=%.2fs apply=%.2fs gap=%.2fs mode=%s req=%d bytes=%d layers=%d",
+                    "ResolumeControlPanel: poll #%d changed=%d total=%.2fs fetch=%.2fs apply=%.2fs gap=%.2fs mode=%s req=%d bytes=%d layers=%d",
                     tick,
                     changed or 0,
                     tick_s,
@@ -3744,7 +3793,7 @@ local function run_monitor_loop()
             end
             if tick == 1 then
                 ui_echo(string.format(
-                    "MA3ArenaDeck: first poll %.2fs (fetch %.2fs, mode=%s)",
+                    "ResolumeControlPanel: first poll %.2fs (fetch %.2fs, mode=%s)",
                     tick_s,
                     stats and stats.fetch_s or 0,
                     stats and stats.mode or "?"
@@ -3761,6 +3810,9 @@ local function run_monitor_loop()
         -- early so the next poll confirms the new state at once. An aborted
         -- poll (tap fired mid-scan) skips the wait entirely.
         interval = get_poll_interval()
+        if not ok then
+            interval = math.max(interval, lc.OFFLINE_RETRY_SEC)
+        end
         local until_t = Time() + interval
         local skip_wait = stats and stats.aborted
         while not skip_wait and get_monitor_flag() and still_owner() do
@@ -3786,10 +3838,10 @@ local function run_monitor_loop()
     if still_owner() then
         set_monitor_flag(false)
         update_control_button_styles()
-        Printf("MA3ArenaDeck: POLL OFF - monitor stopped (after %d ticks)", tick)
-        ui_echo("MA3ArenaDeck: POLL OFF - monitor stopped")
+        Printf("ResolumeControlPanel: POLL OFF - monitor stopped (after %d ticks)", tick)
+        ui_echo("ResolumeControlPanel: POLL OFF - monitor stopped")
     else
-        Printf("MA3ArenaDeck: monitor instance replaced (after %d ticks)", tick)
+        Printf("ResolumeControlPanel: monitor instance replaced (after %d ticks)", tick)
     end
 end
 
@@ -3964,12 +4016,12 @@ function lc.open_fader_dialog(scope, kind)
     end)
 
     if ok then
-        Printf("MA3ArenaDeck: fader popup %s", lc.fader_title(scope, kind))
+        Printf("ResolumeControlPanel: fader popup %s", lc.fader_title(scope, kind))
         return true
     end
 
     -- Fallback: type a value (0-100) when the UI objects are unavailable.
-    Printf("MA3ArenaDeck: fader popup failed (%s), asking for a value", tostring(err))
+    Printf("ResolumeControlPanel: fader popup failed (%s), asking for a value", tostring(err))
     local typed = nil
     pcall(function()
         typed = TextInput(
@@ -3992,11 +4044,11 @@ local function run_full_sync()
     -- Ensure a running monitor yields before we rebuild the layout.
     set_monitor_flag(false)
 
-    Printf("MA3ArenaDeck: SYNC starting (v%s)", PLUGIN_VERSION)
-    Printf("MA3ArenaDeck: fetching composition...")
+    Printf("ResolumeControlPanel: SYNC starting (v%s)", PLUGIN_VERSION)
+    Printf("ResolumeControlPanel: fetching composition...")
     local clips, err, composition, grid = fetch_available_clips()
     if not clips then
-        Printf("MA3ArenaDeck ERROR: %s", tostring(err))
+        Printf("ResolumeControlPanel ERROR: %s", tostring(err))
         Printf("Check that Resolume Webserver is enabled and reachable at %s", composition_url())
         return
     end
@@ -4006,10 +4058,10 @@ local function run_full_sync()
     lc.delete_legacy_appearances()
     local appearance_map = sync_thumbnails(clips)
 
-    Printf("MA3ArenaDeck: building Layout %d '%s'...", LAYOUT_INDEX, LAYOUT_NAME)
+    Printf("ResolumeControlPanel: building Layout %d '%s'...", LAYOUT_INDEX, LAYOUT_NAME)
     local layout, layout_err, created = build_layout(clips, grid, appearance_map)
     if not layout then
-        Printf("MA3ArenaDeck ERROR: %s", tostring(layout_err))
+        Printf("ResolumeControlPanel ERROR: %s", tostring(layout_err))
         return
     end
 
@@ -4019,7 +4071,7 @@ local function run_full_sync()
     end
 
     Printf(
-        "MA3ArenaDeck: layout ready (%d elements, %d clips, %d layer rows)",
+        "ResolumeControlPanel: layout ready (%d elements, %d clips, %d layer rows)",
         created or 0,
         #clips,
         grid.layer_count
@@ -4056,7 +4108,7 @@ function Main(display_handle, argument)
     end
 
     Printf(
-        "MA3ArenaDeck: v%s starting (%s) arg='%s' (type=%s)",
+        "ResolumeControlPanel: v%s starting (%s) arg='%s' (type=%s)",
         PLUGIN_VERSION,
         tostring(pluginName or "plugin"),
         arg,
@@ -4100,7 +4152,7 @@ function Main(display_handle, argument)
     if arg == "stop" or arg == "polloff" or arg == "poll off" or arg == "off" then
         set_monitor_flag(false)
         update_control_button_styles()
-        Printf("MA3ArenaDeck: stop requested")
+        Printf("ResolumeControlPanel: stop requested")
         return
     end
 
