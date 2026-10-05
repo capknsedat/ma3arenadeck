@@ -26,7 +26,7 @@ local signalTable = select(3, ...)
 local myHandle = select(4, ...)
 
 -- Bump when changing runtime behavior so System Monitor proves the reload.
-local PLUGIN_VERSION = "2026-10-05t"
+local PLUGIN_VERSION = "2026-10-05u"
 
 ------------------------------------------------------------------------
 -- Configuration (defaults; overridden by GlobalVars / setup dialog)
@@ -2126,6 +2126,39 @@ local function get_layouts_pool()
     return DataPool().Layouts
 end
 
+--- A layout already at Layout Index is only reused when it is ours (its
+--- name is the Layout Name, ResolumeControlPanel or the old MA3ArenaDeck)
+--- or empty. Anything else is the user's and is never cleared: returns the
+--- reason, or nil when the slot is free to use.
+function lc.layout_slot_blocked()
+    local layouts = get_layouts_pool()
+    if layouts == nil then
+        return nil
+    end
+    local layout = layouts[LAYOUT_INDEX]
+    if layout == nil or not pool_object_valid(layout) then
+        return nil
+    end
+    local name = object_name(layout) or ""
+    if name == LAYOUT_NAME or name == "ResolumeControlPanel" or name == "MA3ArenaDeck" then
+        return nil
+    end
+    local count = 0
+    pcall(function()
+        count = #layout:Children()
+    end)
+    if count == 0 then
+        return nil
+    end
+    return string.format(
+        "Layout %d is already used by '%s' (%d elements).\n"
+            .. "It was not changed. Pick an empty Layout Index in setup and Sync again.",
+        LAYOUT_INDEX,
+        name,
+        count
+    )
+end
+
 local function ensure_layout()
     local layouts = get_layouts_pool()
     if layouts == nil then
@@ -4045,6 +4078,17 @@ local function run_full_sync()
     set_monitor_flag(false)
 
     Printf("ResolumeControlPanel: SYNC starting (v%s)", PLUGIN_VERSION)
+    -- Check the layout slot first, so nothing is created when it is taken.
+    local blocked = lc.layout_slot_blocked()
+    if blocked then
+        Printf("ResolumeControlPanel: SYNC stopped - %s", blocked)
+        pcall(MessageBox, {
+            title = "ResolumeControlPanel",
+            message = blocked,
+            commands = { { value = 1, name = "OK" } },
+        })
+        return
+    end
     Printf("ResolumeControlPanel: fetching composition...")
     local clips, err, composition, grid = fetch_available_clips()
     if not clips then
