@@ -25,7 +25,7 @@ local signalTable = select(3, ...)
 local myHandle = select(4, ...)
 
 -- Bump when changing runtime behavior so System Monitor proves the reload.
-local PLUGIN_VERSION = "2026-10-05r"
+local PLUGIN_VERSION = "2026-10-05s"
 
 ------------------------------------------------------------------------
 -- Configuration (defaults; overridden by GlobalVars / setup dialog)
@@ -2839,8 +2839,10 @@ local function add_control_buttons(layout, layer_count)
         },
     }
 
-    -- Scene recorder row under the controls: REC 1, PLAY 1, REC 2, ...
-    local scene_y = y - (BUTTON_HEIGHT + BUTTON_GAP)
+    -- Scene recorder row at the top, right of the COMPOSITION label (same
+    -- row, starting over the first clip column): REC 1, PLAY 1, REC 2, ...
+    local scene_y = ORIGIN_Y + ((layer_count or 0) * (CELL_HEIGHT + CELL_GAP_Y))
+    local scene_x = ORIGIN_X + LABEL_WIDTH
     for n = 1, lc.SCENE_COUNT do
         for _, def in ipairs({
             { kind = "rec", label = "\226\151\143 REC " .. n, name = "Res_Rec" .. n },
@@ -2868,12 +2870,12 @@ local function add_control_buttons(layout, layer_count)
     for _, btn in ipairs(buttons) do
         local row = btn.row or 1
         row_count[row] = row_count[row] + 1
-        local bx = x + ((row_count[row] - 1) * (BUTTON_WIDTH + BUTTON_GAP))
+        local bx = (row == 2 and scene_x or x) + ((row_count[row] - 1) * (BUTTON_WIDTH + BUTTON_GAP))
         local geo = {
             x = bx,
             y = row == 2 and scene_y or y,
             width = BUTTON_WIDTH,
-            height = BUTTON_HEIGHT,
+            height = row == 2 and CELL_HEIGHT or BUTTON_HEIGHT,
             text = btn.label,
             text_size = 16,
             border = 5,

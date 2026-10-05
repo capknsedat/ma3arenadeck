@@ -175,7 +175,7 @@ Plugin "MA3ArenaDeck" "monitor"
 
 ## Scene recorder (REC / PLAY)
 
-Under the control buttons there are 5 pairs: **REC 1 / PLAY 1 … REC 5 / PLAY 5** (macros `Res_Rec1-5`, `Res_Play1-5`). POLL ON must be running.
+At the top, right of the COMPOSITION label, there are 5 pairs: **REC 1 / PLAY 1 … REC 5 / PLAY 5** (macros `Res_Rec1-5`, `Res_Play1-5`). POLL ON must be running.
 
 - Tap **REC n**: recording starts (red). Tap clips, X and B buttons; each tap and its timing is stored. Tap **REC n** again to stop and save.
 - Tap **PLAY n**: the scene loops with the same order and timing until **PLAY n** is tapped again (green while playing).
