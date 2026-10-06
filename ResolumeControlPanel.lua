@@ -26,7 +26,7 @@ local signalTable = select(3, ...)
 local myHandle = select(4, ...)
 
 -- Bump when changing runtime behavior so System Monitor proves the reload.
-local PLUGIN_VERSION = "2026-10-06y"
+local PLUGIN_VERSION = "2026-10-06z"
 
 ------------------------------------------------------------------------
 -- Configuration (defaults; overridden by GlobalVars / setup dialog)
@@ -2408,6 +2408,7 @@ local function cleanup_stray_rcs_macro_elements(layout)
         local is_ctrl_button = type(note) == "string" and note:find("^resolume%-ctrl:") ~= nil
         local is_clip = type(note) == "string" and note:find("^resolume%-clip:") ~= nil
         local is_level = type(note) == "string" and note:find("^resolume%-lvl:") ~= nil
+            or note == "resolume-bpm"
         -- Clip cells may have Res_Clip_* macros assigned when trigger mode is on;
         -- layer / composition control cells always carry their Res_* macro.
         if not is_ctrl_button and not is_clip and not is_level then
