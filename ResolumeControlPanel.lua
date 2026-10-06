@@ -26,7 +26,7 @@ local signalTable = select(3, ...)
 local myHandle = select(4, ...)
 
 -- Bump when changing runtime behavior so System Monitor proves the reload.
-local PLUGIN_VERSION = "2026-10-06w"
+local PLUGIN_VERSION = "2026-10-06x"
 
 ------------------------------------------------------------------------
 -- Configuration (defaults; overridden by GlobalVars / setup dialog)
@@ -3957,12 +3957,24 @@ function lc.cursor_position()
     if mouse == nil then
         return nil, nil, "MouseObj() returned nil"
     end
+    local function first_child()
+        local children = mouse:Children()
+        return children and children[1]
+    end
     local tries = {
         { "AbsRect", function() return mouse.AbsRect end },
         { "Get AbsRect", function() return mouse:Get("AbsRect") end },
         { "X/Y", function() return { x = mouse.X, y = mouse.Y } end },
         { "PosX/PosY", function() return { x = mouse.PosX, y = mouse.PosY } end },
         { "Get X/Y", function() return { x = mouse:Get("X"), y = mouse:Get("Y") } end },
+        { "Pos", function() return mouse.Pos end },
+        { "Position", function() return mouse.Position end },
+        { "AbsPos", function() return mouse.AbsPos end },
+        { "MousePos", function() return mouse.MousePos end },
+        { "MouseX/MouseY", function() return { x = mouse.MouseX, y = mouse.MouseY } end },
+        { "child AbsRect", function() return first_child().AbsRect end },
+        { "child X/Y", function() local c = first_child() return { x = c.X, y = c.Y } end },
+        { "child Pos", function() return first_child().Pos end },
     }
     local seen = {}
     for _, t in ipairs(tries) do
@@ -4002,6 +4014,22 @@ function lc.place_near_cursor(base, overlay, w, h)
     local mx, my, how = lc.cursor_position()
     if mx == nil then
         Printf("ResolumeControlPanel: popup stays centred, no cursor position (%s)", tostring(how))
+        -- Once per session: list what the mouse object offers, so the right
+        -- property name can be read from the System Monitor.
+        if not lc.mouse_dumped then
+            lc.mouse_dumped = true
+            pcall(function()
+                local mouse = MouseObj()
+                Printf("ResolumeControlPanel: ===== MouseObj dump start =====")
+                mouse:Dump()
+                local children = mouse:Children() or {}
+                Printf("ResolumeControlPanel: MouseObj children: %d", #children)
+                if children[1] then
+                    children[1]:Dump()
+                end
+                Printf("ResolumeControlPanel: ===== MouseObj dump end =====")
+            end)
+        end
         return
     end
     local ox, oy, ow, oh = nil, nil, nil, nil
