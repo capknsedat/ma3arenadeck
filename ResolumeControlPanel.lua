@@ -26,7 +26,7 @@ local signalTable = select(3, ...)
 local myHandle = select(4, ...)
 
 -- Bump when changing runtime behavior so System Monitor proves the reload.
-local PLUGIN_VERSION = "2026-10-06z"
+local PLUGIN_VERSION = "2026-10-06z2"
 
 ------------------------------------------------------------------------
 -- Configuration (defaults; overridden by GlobalVars / setup dialog)
@@ -64,7 +64,9 @@ local FETCH_THUMBNAILS = true
 local IMAGE_POOL = 3
 local IMAGE_START_INDEX = 200
 local APPEARANCE_START_INDEX = 200
-local MAX_MEDIA_SLOTS = 300
+-- Slots searched from Image / Appearance Start. Each clip needs one image
+-- and two appearances, so 300 ran out at 150 clips and the rest got none.
+local MAX_MEDIA_SLOTS = 2000
 local IMAGE_NAME_PREFIX = "Res_"
 local APPEARANCE_IDLE_PREFIX = "Res_"
 local APPEARANCE_PLAY_PREFIX = "ResP_"
@@ -745,7 +747,10 @@ local function collect_clips(composition)
                     selected = param_value(clip.selected, false),
                     media_path = clip_media_path(clip),
                     thumbnail_path = thumbnail.path,
-                    has_thumbnail = thumbnail.is_default == false,
+                    -- Generator / source clips only have Resolume's default
+                    -- thumbnail; import that too so no cell shows an empty macro.
+                    has_thumbnail = true,
+                    default_thumbnail = thumbnail.is_default ~= false,
                     thumbnail_update = thumbnail.last_update,
                 }
             end
@@ -1171,19 +1176,51 @@ function lc.macro_slot(name)
     return i
 end
 
-local function find_pool_index_by_name(pool, name, start_index, max_slots)
-    for i = start_index, start_index + max_slots - 1 do
+--- One scan of a pool range per sync (name -> slot, next free slot), so
+--- hundreds of clips do not each walk thousands of slots. Every hit is
+--- checked against the live pool before it is used.
+--- Outside a sync (lc.slot_cache nil) every call scans fresh.
+function lc.slot_scan(pool, start_index, max_slots)
+    local key = tostring(pool) .. ":" .. tostring(start_index)
+    local cache = lc.slot_cache and lc.slot_cache[key]
+    if cache then
+        return cache
+    end
+    cache = { names = {}, next_free = start_index, last = start_index + max_slots - 1 }
+    local count = 0
+    pcall(function()
+        count = tonumber(pool:Count()) or 0
+    end)
+    for i = start_index, math.min(cache.last, count) do
         local obj = pool[i]
-        if pool_object_valid(obj) and object_name(obj) == name then
-            return i
+        if pool_object_valid(obj) then
+            local name = object_name(obj)
+            if name ~= nil and cache.names[name] == nil then
+                cache.names[name] = i
+            end
         end
     end
+    if lc.slot_cache then
+        lc.slot_cache[key] = cache
+    end
+    return cache
+end
+
+local function find_pool_index_by_name(pool, name, start_index, max_slots)
+    local cache = lc.slot_scan(pool, start_index, max_slots)
+    local i = cache.names[name]
+    if i ~= nil and pool_object_valid(pool[i]) and object_name(pool[i]) == name then
+        return i
+    end
+    cache.names[name] = nil
     return nil
 end
 
 local function find_free_pool_index(pool, start_index, max_slots)
-    for i = start_index, start_index + max_slots - 1 do
+    local cache = lc.slot_scan(pool, start_index, max_slots)
+    for i = cache.next_free, cache.last do
         if not pool_object_valid(pool[i]) then
+            cache.next_free = i + 1
             return i
         end
     end
@@ -1199,6 +1236,7 @@ local function ensure_pool_index(pool, name, start_index, max_slots)
     if not free then
         return nil, "No free pool slots left in configured range"
     end
+    lc.slot_scan(pool, start_index, max_slots).names[name] = free
     return free
 end
 
@@ -1694,6 +1732,7 @@ local function sync_thumbnails(clips)
     local fail_count = 0
 
     Printf("ResolumeControlPanel: importing thumbnails / appearances...")
+    lc.slot_cache = {}
 
     for _, clip in ipairs(clips) do
         local media, err
@@ -1732,6 +1771,7 @@ local function sync_thumbnails(clips)
         end
     end
 
+    lc.slot_cache = nil
     Printf(
         "ResolumeControlPanel: media done (ok=%d no-thumb=%d fail=%d)",
         ok_count,
