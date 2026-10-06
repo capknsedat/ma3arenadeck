@@ -1,5 +1,5 @@
 -- Plugin: ResolumeControlPanel (Resolume composition grid for grandMA3)
--- Based on MA3ArenaDeck by Simon Kotting.
+-- Authors: Sedat Çapkın & Simon Kotting (based on MA3ArenaDeck by Simon Kotting).
 -- Copyright (c) 2026 Simon Kotting — MIT License (see LICENSE)
 -- Fetches the current Resolume composition, builds a layout grid, imports
 -- clip thumbnails as Images/Appearances, and can poll connected state to
@@ -26,7 +26,7 @@ local signalTable = select(3, ...)
 local myHandle = select(4, ...)
 
 -- Bump when changing runtime behavior so System Monitor proves the reload.
-local PLUGIN_VERSION = "2026-10-06z2"
+local PLUGIN_VERSION = "1.2.6"
 
 ------------------------------------------------------------------------
 -- Configuration (defaults; overridden by GlobalVars / setup dialog)
