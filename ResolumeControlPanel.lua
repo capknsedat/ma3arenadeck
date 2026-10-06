@@ -26,7 +26,7 @@ local signalTable = select(3, ...)
 local myHandle = select(4, ...)
 
 -- Bump when changing runtime behavior so System Monitor proves the reload.
-local PLUGIN_VERSION = "2026-10-05v"
+local PLUGIN_VERSION = "2026-10-06w"
 
 ------------------------------------------------------------------------
 -- Configuration (defaults; overridden by GlobalVars / setup dialog)
@@ -3860,6 +3860,7 @@ local function run_monitor_loop()
             local yield_ok = pcall(function()
                 coroutine.yield(slice)
             end)
+            lc.recheck_popup_place()
             if not yield_ok then
                 local slice_end = Time() + slice
                 while Time() < slice_end do
@@ -3949,46 +3950,128 @@ function lc.rect_numbers(r)
     return x, y, tonumber(w), tonumber(h)
 end
 
---- Move the popup next to where the screen was tapped / clicked (the
---- cursor position) instead of the screen centre. Right of the cursor,
---- or left of it when there is no room, and kept fully on screen.
-function lc.place_near_cursor(base, overlay, w, h)
-    local ok, err = pcall(function()
-        local mx, my = lc.rect_numbers(MouseObj().AbsRect)
-        if mx == nil then
-            error("no cursor position")
+--- Cursor position (screen pixels). Builds name it differently, so try
+--- each known form and remember which one worked for the log.
+function lc.cursor_position()
+    local mouse = MouseObj and MouseObj()
+    if mouse == nil then
+        return nil, nil, "MouseObj() returned nil"
+    end
+    local tries = {
+        { "AbsRect", function() return mouse.AbsRect end },
+        { "Get AbsRect", function() return mouse:Get("AbsRect") end },
+        { "X/Y", function() return { x = mouse.X, y = mouse.Y } end },
+        { "PosX/PosY", function() return { x = mouse.PosX, y = mouse.PosY } end },
+        { "Get X/Y", function() return { x = mouse:Get("X"), y = mouse:Get("Y") } end },
+    }
+    local seen = {}
+    for _, t in ipairs(tries) do
+        local ok, value = pcall(t[2])
+        if ok then
+            local x, y = lc.rect_numbers(value)
+            if x ~= nil then
+                return x, y, t[1]
+            end
+            seen[#seen + 1] = t[1] .. "=" .. tostring(value)
+        else
+            seen[#seen + 1] = t[1] .. " failed"
         end
-        local ox, oy, ow, oh = lc.rect_numbers(overlay.AbsRect)
-        ox, oy = ox or 0, oy or 0
-        ow, oh = ow or 1920, oh or 1080
-        mx, my = mx - ox, my - oy
-        local gap = 30
-        local x = mx + gap
-        if x + w > ow then
-            x = mx - gap - w
-        end
-        local y = my - h / 2
-        x = math.max(0, math.min(x, ow - w))
-        y = math.max(0, math.min(y, oh - h))
-        pcall(function()
-            base.AlignmentH = "Left"
-        end)
-        pcall(function()
-            base.AlignmentV = "Top"
-        end)
-        base.X = math.floor(x)
-        base.Y = math.floor(y)
-        Printf(
-            "ResolumeControlPanel: fader popup at %d,%d (cursor %d,%d)",
-            math.floor(x),
-            math.floor(y),
-            math.floor(mx),
-            math.floor(my)
-        )
+    end
+    return nil, nil, table.concat(seen, "; ")
+end
+
+--- Set one UI property, true when the build accepted it.
+function lc.try_set(obj, prop, value)
+    local ok = pcall(function()
+        obj[prop] = value
     end)
     if not ok then
-        Printf("ResolumeControlPanel: fader popup stays centred (%s)", tostring(err))
+        ok = pcall(function()
+            obj:Set(prop, tostring(value))
+        end)
     end
+    return ok
+end
+
+--- Move the popup next to where the screen was tapped / clicked (the
+--- cursor position) instead of the screen centre: right of the cursor,
+--- or left of it when there is no room, and kept fully on screen.
+--- Every step is logged ("ResolumeControlPanel: popup ...") so the
+--- System Monitor shows why it stayed centred on a build.
+function lc.place_near_cursor(base, overlay, w, h)
+    local mx, my, how = lc.cursor_position()
+    if mx == nil then
+        Printf("ResolumeControlPanel: popup stays centred, no cursor position (%s)", tostring(how))
+        return
+    end
+    local ox, oy, ow, oh = nil, nil, nil, nil
+    pcall(function()
+        ox, oy, ow, oh = lc.rect_numbers(overlay.AbsRect)
+    end)
+    ox, oy = ox or 0, oy or 0
+    if ow == nil or oh == nil then
+        pcall(function()
+            ow, oh = tonumber(overlay.W) or ow, tonumber(overlay.H) or oh
+        end)
+    end
+    ow, oh = ow or 1920, oh or 1080
+    mx, my = mx - ox, my - oy
+    local gap = 30
+    local x = mx + gap
+    if x + w > ow then
+        x = mx - gap - w
+    end
+    local y = my - h / 2
+    x = math.floor(math.max(0, math.min(x, ow - w)))
+    y = math.floor(math.max(0, math.min(y, oh - h)))
+
+    local set = {}
+    for _, kv in ipairs({
+        { "AlignmentH", "Left" },
+        { "AlignmentV", "Top" },
+        { "X", x },
+        { "Y", y },
+    }) do
+        set[#set + 1] = kv[1] .. (lc.try_set(base, kv[1], kv[2]) and "=ok" or "=no")
+    end
+    -- No X / Y on this build: offset from the top-left corner with Margin.
+    if set[3] == "X=no" then
+        set[#set + 1] = "Margin" .. (lc.try_set(base, "Margin", string.format("%d,%d,0,0", x, y)) and "=ok" or "=no")
+    end
+    lc.popup_place = { base = base, x = x, y = y }
+    Printf(
+        "ResolumeControlPanel: popup target %d,%d (cursor %d,%d via %s, screen %dx%d) %s",
+        x,
+        y,
+        math.floor(mx),
+        math.floor(my),
+        tostring(how),
+        math.floor(ow),
+        math.floor(oh),
+        table.concat(set, " ")
+    )
+end
+
+--- After the popup has been drawn once: re-apply the position (some builds
+--- lay the dialog out again and centre it) and log where it really is.
+function lc.recheck_popup_place()
+    local place = lc.popup_place
+    if place == nil then
+        return
+    end
+    lc.popup_place = nil
+    pcall(function()
+        lc.try_set(place.base, "X", place.x)
+        lc.try_set(place.base, "Y", place.y)
+        local ax, ay = lc.rect_numbers(place.base.AbsRect)
+        Printf(
+            "ResolumeControlPanel: popup now at %s,%s (target %d,%d)",
+            tostring(ax and math.floor(ax)),
+            tostring(ay and math.floor(ay)),
+            place.x,
+            place.y
+        )
+    end)
 end
 
 function lc.open_fader_dialog(scope, kind)
@@ -4045,7 +4128,6 @@ function lc.open_fader_dialog(scope, kind)
         base.Name = "ResArena Fader Control"
         base.W = 260
         base.H = 620
-        lc.place_near_cursor(base, overlay, 260, 620)
         base.Columns = 1
         base.Rows = 2
         base[1][1].SizePolicy = "Fixed"
@@ -4107,6 +4189,7 @@ function lc.open_fader_dialog(scope, kind)
         pcall(function()
             start = lc.parse_fader_value(fader.Value)
         end)
+        lc.place_near_cursor(base, overlay, 260, 620)
         if start and math.abs(start - current) <= 0.03 then
             picked_up = true
         else
