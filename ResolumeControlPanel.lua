@@ -26,7 +26,7 @@ local signalTable = select(3, ...)
 local myHandle = select(4, ...)
 
 -- Bump when changing runtime behavior so System Monitor proves the reload.
-local PLUGIN_VERSION = "2026-10-06x"
+local PLUGIN_VERSION = "2026-10-06y"
 
 ------------------------------------------------------------------------
 -- Configuration (defaults; overridden by GlobalVars / setup dialog)
@@ -145,6 +145,8 @@ lc.LEVEL_COLOR = {
     clear = { r = 120, g = 30, b = 30 },
     bypass_on = { r = 255, g = 0, b = 0 },
     bypass_off = { r = 70, g = 70, b = 75 },
+    bpm_linked = { r = 255, g = 170, b = 0 },
+    bpm_free = { r = 70, g = 70, b = 75 },
 }
 
 -- Control button colors (active = currently selected mode)
@@ -779,6 +781,10 @@ local function collect_clips(composition)
         max_column = max_column,
         master = tonumber(param_value(composition.master, 1)) or 1,
         bypassed = param_value(composition.bypassed, false) == true,
+        tempo = tonumber(param_value(
+            type(composition.tempocontroller) == "table" and composition.tempocontroller.tempo or nil,
+            nil
+        )),
     }
 end
 
@@ -2042,6 +2048,7 @@ function lc.ensure_layer_control_macros(grid)
     add({ scope = 0, kind = "clear", line = lc.action_macro_line("clearall"), name = "Res_ClearAll" })
     add({ scope = 0, kind = "bypass", line = lc.action_macro_line("bypass"), name = "Res_Bypass" })
     fader(0, "master", "Res_GrandMaster")
+    add({ scope = 0, kind = "bpm", line = plugin_command("bpm"), name = "Res_BPM" })
 
     for _, layer in ipairs(grid.layers or {}) do
         local L = layer.index
@@ -3053,6 +3060,167 @@ function lc.update_level_display(scope, kind, value)
     end
 end
 
+------------------------------------------------------------------------
+-- BPM: Resolume composition tempo, optionally following an MA3 speed
+-- master. Tapping BPM picks the speed master; while POLL ON runs, its BPM
+-- is sent to Resolume whenever it changes (tempo only, not beat phase).
+------------------------------------------------------------------------
+
+function lc.get_bpm_master()
+    return math.floor(tonumber(cfg_get("BpmSpeed", 0)) or 0)
+end
+
+function lc.speed_masters()
+    local pool = nil
+    pcall(function()
+        pool = ShowData().Masters.Speed
+    end)
+    return pool
+end
+
+--- BPM shown by MA3 speed master n (nil when unreadable).
+function lc.read_speed_bpm(n)
+    local pool = lc.speed_masters()
+    local master = pool and pool[n]
+    if master == nil then
+        return nil
+    end
+    local bpm = nil
+    pcall(function()
+        local text = master:GetFaderText({})
+        bpm = tonumber(tostring(text or ""):match("%d+%.?%d*"))
+    end)
+    if bpm == nil then
+        -- Fallback: fader position -> BPM (50% = 60, 100% = 225), times
+        -- 2^SpeedScale, as documented on the MA forum.
+        pcall(function()
+            local percent = tonumber(master:GetFader({})) or 0
+            local scale = tonumber(master.SpeedScale or master.speedscale) or 0
+            local exponent = math.log(60 / 225) / math.log(50 / 100)
+            bpm = 225 * (percent / 100) ^ exponent * 2 ^ scale
+        end)
+    end
+    return bpm
+end
+
+function lc.bpm_label()
+    local bpm = tonumber(cfg_get("BpmValue", ""))
+    local text = bpm and string.format("BPM %d", math.floor(bpm + 0.5)) or "BPM"
+    local n = lc.get_bpm_master()
+    if n > 0 then
+        text = text .. string.format(" (S%d)", n)
+    end
+    return text
+end
+
+function lc.style_bpm_button(element)
+    lc.clear_appearance(element)
+    local c = lc.get_bpm_master() > 0 and lc.LEVEL_COLOR.bpm_linked or lc.LEVEL_COLOR.bpm_free
+    set_element_border_color(element, c.r, c.g, c.b)
+    pcall(function()
+        element:Set("customtexttext", lc.bpm_label())
+    end)
+end
+
+function lc.update_bpm_display()
+    local layout = DataPool().Layouts[LAYOUT_INDEX]
+    if layout == nil then
+        return
+    end
+    for _, element in ipairs(layout:Children()) do
+        local note = nil
+        pcall(function()
+            note = element.Note or element.note
+        end)
+        if note == "resolume-bpm" then
+            lc.style_bpm_button(element)
+        end
+    end
+end
+
+--- BPM button: pick which MA3 speed master Resolume's tempo follows.
+function lc.choose_bpm_master(display_handle)
+    local pool = lc.speed_masters()
+    local items = { "No link" }
+    local numbers = { 0 }
+    local count = 0
+    pcall(function()
+        count = math.min(tonumber(pool:Count()) or 0, 64)
+    end)
+    for i = 1, count do
+        local master = pool[i]
+        if pool_object_valid(master) then
+            local name = object_name(master) or ("Speed " .. i)
+            local bpm = lc.read_speed_bpm(i)
+            items[#items + 1] = string.format("%d  %s%s", i, name, bpm and string.format("  (%d BPM)", math.floor(bpm + 0.5)) or "")
+            numbers[#numbers + 1] = i
+        end
+    end
+
+    local chosen = nil
+    local ok, index, value = pcall(PopupInput, {
+        title = "Resolume BPM follows",
+        caller = display_handle or GetFocusDisplay(),
+        items = items,
+    })
+    if ok and (index ~= nil or value ~= nil) then
+        for k, label in ipairs(items) do
+            if label == value then
+                chosen = numbers[k]
+            end
+        end
+        if chosen == nil and tonumber(index) then
+            -- Some builds return a 0-based index, others 1-based.
+            local i = tonumber(index)
+            chosen = numbers[i + 1] or numbers[i]
+        end
+    elseif not ok then
+        Printf("ResolumeControlPanel: speed master list failed (%s), asking for a number", tostring(index))
+        local typed = nil
+        pcall(function()
+            typed = TextInput("Speed master number (0 = no link)", tostring(lc.get_bpm_master()))
+        end)
+        chosen = tonumber(typed)
+    end
+    if chosen == nil then
+        return
+    end
+    cfg_set("BpmSpeed", tostring(math.floor(chosen)))
+    lc.last_bpm_sent = nil
+    Printf("ResolumeControlPanel: BPM follows %s", chosen > 0 and ("speed master " .. chosen) or "nothing")
+    lc.update_bpm_display()
+end
+
+--- Poll loop: send the linked speed master's BPM to Resolume on change.
+function lc.bpm_tick()
+    local n = lc.get_bpm_master()
+    if n <= 0 then
+        return
+    end
+    local bpm = lc.read_speed_bpm(n)
+    if bpm == nil or bpm <= 0 then
+        return
+    end
+    bpm = math.max(20, math.min(500, bpm))
+    if lc.last_bpm_sent ~= nil and math.abs(bpm - lc.last_bpm_sent) < 0.05 then
+        return
+    end
+    local ok, err = lc.http_put(
+        composition_url(),
+        string.format('{"tempocontroller":{"tempo":{"value":%.2f}}}', bpm),
+        1
+    )
+    if ok then
+        lc.last_bpm_sent = bpm
+        cfg_set("BpmValue", string.format("%.2f", bpm))
+        lc.update_bpm_display()
+        Printf("ResolumeControlPanel: BPM %.1f -> Resolume (speed master %d)", bpm, n)
+    elseif not lc.bpm_error_logged then
+        lc.bpm_error_logged = true
+        Printf("ResolumeControlPanel: BPM send failed (%s)", tostring(err))
+    end
+end
+
 --- Build the X / B buttons and fader buttons left of the layer labels.
 function lc.add_layer_controls(layout, grid)
     local defs = lc.ensure_layer_control_macros(grid)
@@ -3060,6 +3228,9 @@ function lc.add_layer_controls(layout, grid)
     local layer_count = grid.layer_count or 0
 
     lc.set_level(0, "master", grid.master or 1)
+    if grid.tempo then
+        cfg_set("BpmValue", string.format("%.2f", grid.tempo))
+    end
     for _, layer in ipairs(grid.layers or {}) do
         lc.set_level(layer.index, "master", layer.master or 1)
         lc.set_level(layer.index, "video", layer.opacity or 1)
@@ -3093,7 +3264,17 @@ function lc.add_layer_controls(layout, grid)
                 border = 4,
                 note = lc.level_note(def.scope, def.kind, 0),
             }
-            if def.kind == "clear" then
+            if def.kind == "bpm" then
+                -- BPM sits in the layer-label column, right above COMPOSITION,
+                -- with the same size as that label.
+                local cx = label_pos(1, layer_count)
+                opts.x = cx
+                opts.y = row_y(0) + CELL_HEIGHT + CELL_GAP_Y
+                opts.width = LABEL_WIDTH - CELL_GAP_X
+                opts.text = lc.bpm_label()
+                opts.text_size = 14
+                opts.note = "resolume-bpm"
+            elseif def.kind == "clear" then
                 opts.x = x0
                 opts.width = lc.CTRL_BTN_WIDTH
                 opts.text = def.scope == 0 and "X ALL" or "X"
@@ -3105,6 +3286,10 @@ function lc.add_layer_controls(layout, grid)
                 end
                 opts.x = x0 + lc.CTRL_BTN_WIDTH + gap + slot * (fw + gap)
                 opts.width = fw
+                if def.scope == 0 and def.kind == "master" then
+                    -- GM spans the A and V columns below it.
+                    opts.width = 2 * fw + gap
+                end
                 opts.text = def.kind == "bypass" and "B"
                     or lc.fader_label(def.scope, def.kind, lc.get_level(def.scope, def.kind))
             end
@@ -3114,7 +3299,9 @@ function lc.add_layer_controls(layout, grid)
                 assign_clip_trigger_macro(el, def.macro_index)
                 lc.center_text(el)
                 lc.dump_element_props(el)
-                if def.kind == "clear" then
+                if def.kind == "bpm" then
+                    lc.style_bpm_button(el)
+                elseif def.kind == "clear" then
                     local c = lc.LEVEL_COLOR.clear
                     lc.clear_appearance(el)
                     set_element_border_color(el, c.r, c.g, c.b)
@@ -3781,6 +3968,7 @@ local function run_monitor_loop()
 
         -- Layout taps queue fires here (SetVar) so Plugin/Cleanup never runs.
         handle_pending_fire()
+        pcall(lc.bpm_tick)
 
         local ok, err, changed, stats = update_playing_highlights()
         local tick_s = Time() - tick_start
@@ -4259,7 +4447,7 @@ lc.OWN_MACRO_PATTERNS = {
     "^Res_Sync$", "^Res_PollOn$", "^Res_PollOff$", "^Res_Interval$", "^Res_TrigToggle$",
     "^Res_Clip_L%d+C%d+$", "^Res_ClearAll$", "^Res_Bypass$", "^Res_GrandMaster$",
     "^Res_L%d+_Clear$", "^Res_L%d+_[MAV]$",
-    "^Res_Rec%d+$", "^Res_Play%d+$", "^Res_Scene%d+$",
+    "^Res_Rec%d+$", "^Res_Play%d+$", "^Res_Scene%d+$", "^Res_BPM$",
 }
 lc.OWN_LAYOUT_NAMES = { "ResolumeControlPanel", "MA3ArenaDeck" }
 
@@ -4336,6 +4524,7 @@ function lc.delete_global_vars()
         "Host", "Port", "LayoutIndex", "LayoutName", "ImageStart", "AppearanceStart",
         "MacroStart", "OnlyWithThumbnail", "FetchThumbnails", "HighlightPreviewing",
         "PollInterval", "Monitor", "MonitorOwner", "Trigger", "Fire", "Action", "Bypassed",
+        "BpmSpeed", "BpmValue",
     }
     for n = 1, lc.SCENE_COUNT do
         keys[#keys + 1] = "Scene" .. n
@@ -4558,6 +4747,15 @@ function Main(display_handle, argument)
 
     -- Layout M / A / V / GM buttons: open a fader popup, then keep polling
     -- (this call replaces the running monitor) so fader moves are sent.
+    if arg == "bpm" then
+        if not ensure_deps() then
+            return
+        end
+        lc.choose_bpm_master(display_handle)
+        run_monitor_loop()
+        return
+    end
+
     local fader_scope, fader_kind = arg:match("^fader%s+(%d+)%s+(%a+)$")
     if fader_scope then
         if not ensure_deps() then
