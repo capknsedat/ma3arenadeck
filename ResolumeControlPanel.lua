@@ -369,18 +369,7 @@ local function show_setup_dialog(display_handle)
                 whiteFilter = "0123456789.",
                 vkPlugin = "TextInputNumOnly",
             },
-            {
-                name = "09 Fader X",
-                value = tostring(cfg_get("FaderX", 0)),
-                whiteFilter = "0123456789",
-                vkPlugin = "TextInputNumOnly",
-            },
-            {
-                name = "10 Fader Y",
-                value = tostring(cfg_get("FaderY", 0)),
-                whiteFilter = "0123456789",
-                vkPlugin = "TextInputNumOnly",
-            },
+
         },
         states = {
             { name = "Fetch thumbnails", state = FETCH_THUMBNAILS and true or false },
@@ -464,8 +453,6 @@ local function show_setup_dialog(display_handle)
     POLL_INTERVAL_SEC = nearest_poll_interval(
         mb_input(result, "08 Poll Interval (s)", POLL_INTERVAL_SEC)
     )
-    cfg_set("FaderX", tostring(math.floor(tonumber(mb_input(result, "09 Fader X", 0)) or 0)))
-    cfg_set("FaderY", tostring(math.floor(tonumber(mb_input(result, "10 Fader Y", 0)) or 0)))
     FETCH_THUMBNAILS = mb_state(result, "Fetch thumbnails", FETCH_THUMBNAILS)
     ONLY_WITH_THUMBNAIL = mb_state(result, "Only clips with thumbnail", ONLY_WITH_THUMBNAIL)
     HIGHLIGHT_PREVIEWING = mb_state(result, "Highlight previewing", HIGHLIGHT_PREVIEWING)
@@ -4111,7 +4098,6 @@ local function run_monitor_loop()
             local yield_ok = pcall(function()
                 coroutine.yield(slice)
             end)
-            lc.recheck_popup_place()
             if not yield_ok then
                 local slice_end = Time() + slice
                 while Time() < slice_end do
@@ -4174,102 +4160,6 @@ end
 
 --- Pop up a draggable fader for one layer / composition level.
 --- Returns true when the on-screen dialog was built.
---- x, y, w, h from an AbsRect (table with x/y/w/h keys, X/Y/W/H keys,
---- an array, or a "x,y,w,h" string, depending on the build).
-function lc.rect_numbers(r)
-    if r == nil then
-        return nil
-    end
-    if type(r) == "string" then
-        local n = {}
-        for v in r:gmatch("-?%d+%.?%d*") do
-            n[#n + 1] = tonumber(v)
-        end
-        r = n
-    end
-    local x, y, w, h
-    pcall(function()
-        x = r.x or r.X or r[1]
-        y = r.y or r.Y or r[2]
-        w = r.w or r.W or r.width or r[3]
-        h = r.h or r.H or r.height or r[4]
-    end)
-    x, y = tonumber(x), tonumber(y)
-    if x == nil or y == nil then
-        return nil
-    end
-    return x, y, tonumber(w), tonumber(h)
-end
-
---- Set one UI property, true when the build accepted it.
-function lc.try_set(obj, prop, value)
-    local ok = pcall(function()
-        obj[prop] = value
-    end)
-    if not ok then
-        ok = pcall(function()
-            obj:Set(prop, tostring(value))
-        end)
-    end
-    return ok
-end
-
---- Fader popup at the position set in setup (09 Fader X / 10 Fader Y,
---- pixels from the top-left of the screen). 0 / 0 = screen centre. The
---- cursor position is not reliable on onPC 2.5, so it is not used.
-function lc.place_fader_popup(base, overlay, w, h)
-    local x = tonumber(cfg_get("FaderX", 0)) or 0
-    local y = tonumber(cfg_get("FaderY", 0)) or 0
-    if x <= 0 and y <= 0 then
-        return
-    end
-    local ow, oh = nil, nil
-    pcall(function()
-        local _, _, rw, rh = lc.rect_numbers(overlay.AbsRect)
-        ow, oh = rw, rh
-    end)
-    if ow == nil or oh == nil then
-        pcall(function()
-            ow, oh = tonumber(overlay.W), tonumber(overlay.H)
-        end)
-    end
-    ow, oh = ow or 1920, oh or 1080
-    x = math.floor(math.max(0, math.min(x, ow - w)))
-    y = math.floor(math.max(0, math.min(y, oh - h)))
-    pcall(function()
-        base.AlignmentH = "Left"
-    end)
-    pcall(function()
-        base.AlignmentV = "Top"
-    end)
-    lc.try_set(base, "X", x)
-    lc.try_set(base, "Y", y)
-    lc.popup_place = { base = base, x = x, y = y }
-    Printf("ResolumeControlPanel: popup at %d,%d (setup Fader X/Y)", x, y)
-end
-
---- After the popup has been drawn once: re-apply the position (some builds
---- lay the dialog out again and centre it) and log where it really is.
-function lc.recheck_popup_place()
-    local place = lc.popup_place
-    if place == nil then
-        return
-    end
-    lc.popup_place = nil
-    pcall(function()
-        lc.try_set(place.base, "X", place.x)
-        lc.try_set(place.base, "Y", place.y)
-        local ax, ay = lc.rect_numbers(place.base.AbsRect)
-        Printf(
-            "ResolumeControlPanel: popup now at %s,%s (target %d,%d)",
-            tostring(ax and math.floor(ax)),
-            tostring(ay and math.floor(ay)),
-            place.x,
-            place.y
-        )
-    end)
-end
-
 function lc.open_fader_dialog(scope, kind)
     local current = lc.get_level(scope, kind)
 
@@ -4370,7 +4260,6 @@ function lc.open_fader_dialog(scope, kind)
         -- pick-up below waits until it reaches the current level.
         local pct = math.floor(current * 100 + 0.5)
         local start = 0
-        lc.place_fader_popup(base, overlay, 260, 620)
         if start and math.abs(start - current) <= 0.03 then
             picked_up = true
         else
