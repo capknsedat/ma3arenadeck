@@ -192,7 +192,8 @@ At the top, right of the COMPOSITION label, there are 5 pairs: **REC 1 / PLAY 1 
 - Tapping the plugin in the Plugin pool first asks **Kur** (setup dialog, then Sync) or **Kaldır** (uninstall). Kaldır shows how many objects it found, and after confirming deletes only what the plugin created: its layout, the `Res_*` macros, `Res_` / `ResP_` appearances, `Res_` images and their PNG files, and the `ResArena_` settings. `Plugin "ResolumeControlPanel" "setup"` opens setup directly.
 - **BPM** (above COMPOSITION, macro `Res_BPM`): tap it to pick an MA3 speed master. While POLL ON runs, Resolume's composition tempo follows that speed master's BPM (tempo only, not beat phase; use RESYNC in Resolume if the beat drifts). Pick "No link" to stop following.
 - The GM button spans the A and V columns.
-- The fader popup opens next to where you tapped (the cursor position) instead of the screen centre, when this MA3 build reports the cursor position.
+- The fader popup opens at **09 Fader X / 10 Fader Y** from setup (pixels from the screen's top-left; 0 / 0 = screen centre). It opens at 0 and picks up once it reaches the current level.
+- Poll interval cycles 0.1 / 0.25 / 0.5 / 1 / 2 / 5 / 10 s. It only sets how fast the red 'playing' frames update; tapping a clip fires it in Resolume at once either way.
 - The layout is only built at Layout Index when that slot is empty, empty of elements, or already a ResolumeControlPanel / MA3ArenaDeck layout. Otherwise SYNC stops before creating anything and says which layout is in the way.
 - If Resolume closes or stops answering while POLL ON runs, the plugin waits 1 s between tries and turns POLL off by itself after 3 polls with no answer. Tap POLL ON again once Resolume is back.
 - If sync fails, check System Monitor for HTTP errors, then verify the webserver URL in a browser from the MA3 machine.

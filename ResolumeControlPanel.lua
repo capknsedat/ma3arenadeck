@@ -26,7 +26,7 @@ local signalTable = select(3, ...)
 local myHandle = select(4, ...)
 
 -- Bump when changing runtime behavior so System Monitor proves the reload.
-local PLUGIN_VERSION = "1.2.6"
+local PLUGIN_VERSION = "1.2.7-test"
 
 ------------------------------------------------------------------------
 -- Configuration (defaults; overridden by GlobalVars / setup dialog)
@@ -73,7 +73,9 @@ local APPEARANCE_PLAY_PREFIX = "ResP_"
 
 -- Status polling
 local POLL_INTERVAL_SEC = 0.25
-local POLL_INTERVAL_OPTIONS = { 0.10, 0.25, 0.50, 1.00, 2.00 }
+-- How often POLL asks Resolume which clips play (red frames only; layout
+-- taps fire at once whatever this is). Longer = less load on MA3.
+local POLL_INTERVAL_OPTIONS = { 0.10, 0.25, 0.50, 1.00, 2.00, 5.00, 10.00 }
 -- While waiting between polls, check for queued layout taps this often.
 local FIRE_CHECK_SEC = 0.03
 local HIGHLIGHT_PREVIEWING = false -- also highlight "Previewing" clips
@@ -367,6 +369,18 @@ local function show_setup_dialog(display_handle)
                 whiteFilter = "0123456789.",
                 vkPlugin = "TextInputNumOnly",
             },
+            {
+                name = "09 Fader X",
+                value = tostring(cfg_get("FaderX", 0)),
+                whiteFilter = "0123456789",
+                vkPlugin = "TextInputNumOnly",
+            },
+            {
+                name = "10 Fader Y",
+                value = tostring(cfg_get("FaderY", 0)),
+                whiteFilter = "0123456789",
+                vkPlugin = "TextInputNumOnly",
+            },
         },
         states = {
             { name = "Fetch thumbnails", state = FETCH_THUMBNAILS and true or false },
@@ -450,6 +464,8 @@ local function show_setup_dialog(display_handle)
     POLL_INTERVAL_SEC = nearest_poll_interval(
         mb_input(result, "08 Poll Interval (s)", POLL_INTERVAL_SEC)
     )
+    cfg_set("FaderX", tostring(math.floor(tonumber(mb_input(result, "09 Fader X", 0)) or 0)))
+    cfg_set("FaderY", tostring(math.floor(tonumber(mb_input(result, "10 Fader Y", 0)) or 0)))
     FETCH_THUMBNAILS = mb_state(result, "Fetch thumbnails", FETCH_THUMBNAILS)
     ONLY_WITH_THUMBNAIL = mb_state(result, "Only clips with thumbnail", ONLY_WITH_THUMBNAIL)
     HIGHLIGHT_PREVIEWING = mb_state(result, "Highlight previewing", HIGHLIGHT_PREVIEWING)
@@ -890,6 +906,12 @@ local function collect_connected_states_by_clips(clip_metas, timeout_sec, should
             return nil, POLL_ABORTED
         end
         requests = requests + 1
+        -- Let MA3 draw between requests, so a poll never freezes the desk.
+        if requests > 1 then
+            pcall(function()
+                coroutine.yield(0)
+            end)
+        end
         local state, err, n = fetch_clip_connected_state(meta, timeout_sec)
         bytes = bytes + (n or 0)
         if not state then
@@ -2493,7 +2515,7 @@ local function style_element(element, opts)
 end
 
 local function interval_button_label()
-    return string.format("POLL %.2fs", get_poll_interval())
+    return string.format("POLL %gs", get_poll_interval())
 end
 
 local function trigger_button_label()
@@ -4179,48 +4201,6 @@ function lc.rect_numbers(r)
     return x, y, tonumber(w), tonumber(h)
 end
 
---- Cursor position (screen pixels). Builds name it differently, so try
---- each known form and remember which one worked for the log.
-function lc.cursor_position()
-    local mouse = MouseObj and MouseObj()
-    if mouse == nil then
-        return nil, nil, "MouseObj() returned nil"
-    end
-    local function first_child()
-        local children = mouse:Children()
-        return children and children[1]
-    end
-    local tries = {
-        { "AbsRect", function() return mouse.AbsRect end },
-        { "Get AbsRect", function() return mouse:Get("AbsRect") end },
-        { "X/Y", function() return { x = mouse.X, y = mouse.Y } end },
-        { "PosX/PosY", function() return { x = mouse.PosX, y = mouse.PosY } end },
-        { "Get X/Y", function() return { x = mouse:Get("X"), y = mouse:Get("Y") } end },
-        { "Pos", function() return mouse.Pos end },
-        { "Position", function() return mouse.Position end },
-        { "AbsPos", function() return mouse.AbsPos end },
-        { "MousePos", function() return mouse.MousePos end },
-        { "MouseX/MouseY", function() return { x = mouse.MouseX, y = mouse.MouseY } end },
-        { "child AbsRect", function() return first_child().AbsRect end },
-        { "child X/Y", function() local c = first_child() return { x = c.X, y = c.Y } end },
-        { "child Pos", function() return first_child().Pos end },
-    }
-    local seen = {}
-    for _, t in ipairs(tries) do
-        local ok, value = pcall(t[2])
-        if ok then
-            local x, y = lc.rect_numbers(value)
-            if x ~= nil then
-                return x, y, t[1]
-            end
-            seen[#seen + 1] = t[1] .. "=" .. tostring(value)
-        else
-            seen[#seen + 1] = t[1] .. " failed"
-        end
-    end
-    return nil, nil, table.concat(seen, "; ")
-end
-
 --- Set one UI property, true when the build accepted it.
 function lc.try_set(obj, prop, value)
     local ok = pcall(function()
@@ -4234,79 +4214,38 @@ function lc.try_set(obj, prop, value)
     return ok
 end
 
---- Move the popup next to where the screen was tapped / clicked (the
---- cursor position) instead of the screen centre: right of the cursor,
---- or left of it when there is no room, and kept fully on screen.
---- Every step is logged ("ResolumeControlPanel: popup ...") so the
---- System Monitor shows why it stayed centred on a build.
-function lc.place_near_cursor(base, overlay, w, h)
-    local mx, my, how = lc.cursor_position()
-    if mx == nil then
-        Printf("ResolumeControlPanel: popup stays centred, no cursor position (%s)", tostring(how))
-        -- Once per session: list what the mouse object offers, so the right
-        -- property name can be read from the System Monitor.
-        if not lc.mouse_dumped then
-            lc.mouse_dumped = true
-            pcall(function()
-                local mouse = MouseObj()
-                Printf("ResolumeControlPanel: ===== MouseObj dump start =====")
-                mouse:Dump()
-                local children = mouse:Children() or {}
-                Printf("ResolumeControlPanel: MouseObj children: %d", #children)
-                if children[1] then
-                    children[1]:Dump()
-                end
-                Printf("ResolumeControlPanel: ===== MouseObj dump end =====")
-            end)
-        end
+--- Fader popup at the position set in setup (09 Fader X / 10 Fader Y,
+--- pixels from the top-left of the screen). 0 / 0 = screen centre. The
+--- cursor position is not reliable on onPC 2.5, so it is not used.
+function lc.place_fader_popup(base, overlay, w, h)
+    local x = tonumber(cfg_get("FaderX", 0)) or 0
+    local y = tonumber(cfg_get("FaderY", 0)) or 0
+    if x <= 0 and y <= 0 then
         return
     end
-    local ox, oy, ow, oh = nil, nil, nil, nil
+    local ow, oh = nil, nil
     pcall(function()
-        ox, oy, ow, oh = lc.rect_numbers(overlay.AbsRect)
+        local _, _, rw, rh = lc.rect_numbers(overlay.AbsRect)
+        ow, oh = rw, rh
     end)
-    ox, oy = ox or 0, oy or 0
     if ow == nil or oh == nil then
         pcall(function()
-            ow, oh = tonumber(overlay.W) or ow, tonumber(overlay.H) or oh
+            ow, oh = tonumber(overlay.W), tonumber(overlay.H)
         end)
     end
     ow, oh = ow or 1920, oh or 1080
-    mx, my = mx - ox, my - oy
-    local gap = 30
-    local x = mx + gap
-    if x + w > ow then
-        x = mx - gap - w
-    end
-    local y = my - h / 2
     x = math.floor(math.max(0, math.min(x, ow - w)))
     y = math.floor(math.max(0, math.min(y, oh - h)))
-
-    local set = {}
-    for _, kv in ipairs({
-        { "AlignmentH", "Left" },
-        { "AlignmentV", "Top" },
-        { "X", x },
-        { "Y", y },
-    }) do
-        set[#set + 1] = kv[1] .. (lc.try_set(base, kv[1], kv[2]) and "=ok" or "=no")
-    end
-    -- No X / Y on this build: offset from the top-left corner with Margin.
-    if set[3] == "X=no" then
-        set[#set + 1] = "Margin" .. (lc.try_set(base, "Margin", string.format("%d,%d,0,0", x, y)) and "=ok" or "=no")
-    end
+    pcall(function()
+        base.AlignmentH = "Left"
+    end)
+    pcall(function()
+        base.AlignmentV = "Top"
+    end)
+    lc.try_set(base, "X", x)
+    lc.try_set(base, "Y", y)
     lc.popup_place = { base = base, x = x, y = y }
-    Printf(
-        "ResolumeControlPanel: popup target %d,%d (cursor %d,%d via %s, screen %dx%d) %s",
-        x,
-        y,
-        math.floor(mx),
-        math.floor(my),
-        tostring(how),
-        math.floor(ow),
-        math.floor(oh),
-        table.concat(set, " ")
-    )
+    Printf("ResolumeControlPanel: popup at %d,%d (setup Fader X/Y)", x, y)
 end
 
 --- After the popup has been drawn once: re-apply the position (some builds
@@ -4426,27 +4365,12 @@ function lc.open_fader_dialog(scope, kind)
             local c = lc.LEVEL_COLOR[kind] or lc.LEVEL_COLOR.master
             fader.Color = string.format("%.3f,%.3f,%.3f,1", c.r / 255, c.g / 255, c.b / 255)
         end)
-        -- Start at the current level where the build allows setting it
-        -- (UiFader.Value is read-only on some versions; pick-up covers that).
+        -- No start value: setting UiFader.Value does not stick on this build
+        -- (it showed 3-5% and then dropped to 0). It opens at 0 and the
+        -- pick-up below waits until it reaches the current level.
         local pct = math.floor(current * 100 + 0.5)
-        local set_ok = pcall(function()
-            fader.Value = pct
-        end)
-        if not set_ok then
-            set_ok = pcall(function()
-                fader:Set("Value", tostring(pct))
-            end)
-        end
-        if not set_ok then
-            pcall(function()
-                fader.Value = string.format("%d%%", pct)
-            end)
-        end
-        local start = nil
-        pcall(function()
-            start = lc.parse_fader_value(fader.Value)
-        end)
-        lc.place_near_cursor(base, overlay, 260, 620)
+        local start = 0
+        lc.place_fader_popup(base, overlay, 260, 620)
         if start and math.abs(start - current) <= 0.03 then
             picked_up = true
         else
@@ -4565,7 +4489,7 @@ function lc.delete_global_vars()
         "Host", "Port", "LayoutIndex", "LayoutName", "ImageStart", "AppearanceStart",
         "MacroStart", "OnlyWithThumbnail", "FetchThumbnails", "HighlightPreviewing",
         "PollInterval", "Monitor", "MonitorOwner", "Trigger", "Fire", "Action", "Bypassed",
-        "BpmSpeed", "BpmValue",
+        "BpmSpeed", "BpmValue", "FaderX", "FaderY",
     }
     for n = 1, lc.SCENE_COUNT do
         keys[#keys + 1] = "Scene" .. n
