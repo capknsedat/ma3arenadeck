@@ -26,7 +26,7 @@ local signalTable = select(3, ...)
 local myHandle = select(4, ...)
 
 -- Bump when changing runtime behavior so System Monitor proves the reload.
-local PLUGIN_VERSION = "1.2.7-test"
+local PLUGIN_VERSION = "1.2.7-test3"
 
 ------------------------------------------------------------------------
 -- Configuration (defaults; overridden by GlobalVars / setup dialog)
@@ -75,7 +75,7 @@ local APPEARANCE_PLAY_PREFIX = "ResP_"
 local POLL_INTERVAL_SEC = 0.25
 -- How often POLL asks Resolume which clips play (red frames only; layout
 -- taps fire at once whatever this is). Longer = less load on MA3.
-local POLL_INTERVAL_OPTIONS = { 0.10, 0.25, 0.50, 1.00, 2.00, 5.00, 10.00 }
+local POLL_INTERVAL_OPTIONS = { 0.10, 0.25, 0.50, 1.00, 2.00, 5.00, 10.00, 30.00, 60.00, 300.00 }
 -- While waiting between polls, check for queued layout taps this often.
 local FIRE_CHECK_SEC = 0.03
 local HIGHLIGHT_PREVIEWING = false -- also highlight "Previewing" clips
@@ -2502,7 +2502,11 @@ local function style_element(element, opts)
 end
 
 local function interval_button_label()
-    return string.format("POLL %gs", get_poll_interval())
+    local v = get_poll_interval()
+    if v >= 60 then
+        return string.format("POLL %gm", v / 60)
+    end
+    return string.format("POLL %gs", v)
 end
 
 local function trigger_button_label()
@@ -3255,19 +3259,28 @@ function lc.bpm_tick()
     if lc.last_bpm_sent ~= nil and math.abs(bpm - lc.last_bpm_sent) < 0.05 then
         return
     end
+    -- After a failed send (Resolume closed) wait before trying again, so a
+    -- dead connection never stalls MA3.
+    if lc.bpm_retry_at and Time() < lc.bpm_retry_at then
+        return
+    end
     local ok, err = lc.http_put(
         composition_url(),
         string.format('{"tempocontroller":{"tempo":{"value":%.2f}}}', bpm),
         1
     )
+    lc.bpm_retry_at = nil
     if ok then
         lc.last_bpm_sent = bpm
         cfg_set("BpmValue", string.format("%.2f", bpm))
         lc.update_bpm_display()
         Printf("ResolumeControlPanel: BPM %.1f -> Resolume (speed master %d)", bpm, n)
-    elseif not lc.bpm_error_logged then
-        lc.bpm_error_logged = true
-        Printf("ResolumeControlPanel: BPM send failed (%s)", tostring(err))
+    else
+        lc.bpm_retry_at = Time() + 5
+        if not lc.bpm_error_logged then
+            lc.bpm_error_logged = true
+            Printf("ResolumeControlPanel: BPM send failed (%s)", tostring(err))
+        end
     end
 end
 
@@ -4089,6 +4102,10 @@ local function run_monitor_loop()
         while not skip_wait and get_monitor_flag() and still_owner() do
             if handle_pending_fire() then
                 break
+            end
+            if Time() - (lc.bpm_checked or 0) >= 0.25 then
+                lc.bpm_checked = Time()
+                pcall(lc.bpm_tick)
             end
             local remaining = until_t - Time()
             if remaining <= 0 then
