@@ -15,9 +15,9 @@
 --   trigger L C  - fire Resolume clip at layer/column (from clip macros)
 --
 -- Layout buttons (macros) under the clip grid:
---   SYNC | POLL ON | POLL OFF | POLL xs | TRIG ON/OFF | prev / next column
+--   SYNC | POLL ON | POLL OFF | POLL xs | TRIG ON/OFF
 --   one button per Resolume deck below that
--- Column headers over the grid, TAP / RESYNC / SPEED / crossfader and
+-- Column headers over the grid, TAP / RESYNC / SPEED and
 -- layer B / S / composition BO in the strip left of the layer labels.
 --
 -- API: GET http://<host>:<port>/api/v1/composition
@@ -29,7 +29,7 @@ local signalTable = select(3, ...)
 local myHandle = select(4, ...)
 
 -- Bump when changing runtime behavior so System Monitor proves the reload.
-local PLUGIN_VERSION = "1.2.8-test"
+local PLUGIN_VERSION = "1.2.8-test2"
 
 ------------------------------------------------------------------------
 -- Configuration (defaults; overridden by GlobalVars / setup dialog)
@@ -2139,6 +2139,20 @@ end
 --- Macros for layer / composition controls, each in its own named slot.
 --- Returns a list of { macro_index, action, ... } definitions in build order.
 function lc.ensure_layer_control_macros(grid)
+    -- Buttons dropped after 1.2.8-test: remove their macros from the pool.
+    if lc.macro_by_name == nil then
+        lc.scan_macro_slots()
+    end
+    for _, old in ipairs({ "Res_Crossfader", "Res_ColPrev", "Res_ColNext" }) do
+        local idx = lc.macro_by_name[old]
+        local obj = idx and DataPool().Macros[idx]
+        if pool_object_valid(obj) and object_name(obj) == old then
+            lc.delete_slot(DataPool().Macros, idx, string.format("Delete Macro %d /NoConfirmation", idx))
+            lc.macro_by_name[old] = nil
+            lc.macro_used[idx] = nil
+            Printf("ResolumeControlPanel: removed old Macro %d '%s'", idx, old)
+        end
+    end
     local defs = {}
     local function add(def)
         def.macro_index = lc.macro_slot(def.name)
@@ -2164,9 +2178,6 @@ function lc.ensure_layer_control_macros(grid)
     act(0, "resync", "resync", "Res_Resync")
     act(0, "blackout", "blackout", "Res_Blackout")
     fader(0, "speed", "Res_Speed")
-    fader(0, "xfade", "Res_Crossfader")
-    act(0, "colprev", "colprev", "Res_ColPrev")
-    act(0, "colnext", "colnext", "Res_ColNext")
     for c = 1, grid.max_column or 0 do
         act(c, "col", "col," .. c, "Res_Col" .. c)
     end
@@ -2316,6 +2327,11 @@ local function clear_layout_elements(layout)
     for i = #children, 1, -1 do
         layout:Delete(i)
     end
+end
+
+--- COMPOSITION / REC row: above the top layer and the column headers.
+function lc.comp_row_y(layer_count)
+    return ORIGIN_Y + (layer_count or 0) * (CELL_HEIGHT + CELL_GAP_Y) + BUTTON_HEIGHT + CELL_GAP_Y
 end
 
 local function cell_pos(column_index, layer_index, _layer_count)
@@ -3042,7 +3058,7 @@ local function add_control_buttons(layout, layer_count)
 
     -- Scene recorder row at the top, right of the COMPOSITION label (same
     -- row, starting over the first clip column): REC 1, PLAY 1, REC 2, ...
-    local scene_y = ORIGIN_Y + ((layer_count or 0) * (CELL_HEIGHT + CELL_GAP_Y))
+    local scene_y = lc.comp_row_y(layer_count)
     local scene_x = ORIGIN_X + LABEL_WIDTH
     for n = 1, lc.SCENE_COUNT do
         for _, def in ipairs({
@@ -3410,16 +3426,9 @@ function lc.run_extra_action(action)
         )
         if ok then
             lc.set_flag(kind, n, on)
-            -- Solo can switch other layers too: read every layer's B / S back.
-            local comp = fetch_composition(2)
-            if type(comp) == "table" then
-                for L, layer in ipairs(comp.layers or {}) do
-                    lc.set_flag("lbyp", L, param_value(layer.bypassed, false) == true)
-                    lc.set_flag("solo", L, param_value(layer.solo, false) == true)
-                end
-            end
-            lc.refresh_extra("lbyp")
-            lc.refresh_extra("solo")
+            -- No read-back of the whole composition here: that answer is
+            -- hundreds of KB and froze MA3 for seconds on every B / S tap.
+            lc.refresh_extra(kind)
         end
         return true, ok, err, string.format("L%d %s %s", n, kind == "lbyp" and "bypass" or "solo", on and "ON" or "OFF")
     elseif kind == "deck" then
@@ -3653,7 +3662,7 @@ function lc.add_layer_controls(layout, grid)
     local function row_y(scope)
         if scope == 0 then
             -- Composition row sits above the top layer (Y-up).
-            return ORIGIN_Y + (layer_count * (CELL_HEIGHT + CELL_GAP_Y))
+            return lc.comp_row_y(layer_count)
         end
         local _, y = label_pos(scope, layer_count)
         return y
@@ -3698,12 +3707,13 @@ function lc.add_layer_controls(layout, grid)
                 opts.y = row_y(0) + 2 * (CELL_HEIGHT + CELL_GAP_Y)
                 opts.text = lc.fader_label(0, def.kind, lc.get_level(0, def.kind))
             elseif def.kind == "col" then
-                -- Column header over each clip column, like Resolume.
+                -- Column header over each clip column, like Resolume:
+                -- between the top layer and the COMPOSITION / REC row.
                 local cx = cell_pos(def.scope, 1, layer_count)
                 opts.x = cx
                 opts.width = CELL_WIDTH
                 opts.height = BUTTON_HEIGHT
-                opts.y = row_y(0) + CELL_HEIGHT + CELL_GAP_Y
+                opts.y = ORIGIN_Y + layer_count * (CELL_HEIGHT + CELL_GAP_Y)
                 opts.text = lc.extra_label(def.kind, def.scope)
                 opts.text_size = 14
             elseif def.kind == "colprev" or def.kind == "colnext" then
