@@ -29,7 +29,7 @@ local signalTable = select(3, ...)
 local myHandle = select(4, ...)
 
 -- Bump when changing runtime behavior so System Monitor proves the reload.
-local PLUGIN_VERSION = "1.2.8-test7"
+local PLUGIN_VERSION = "1.2.8-test8"
 
 ------------------------------------------------------------------------
 -- Configuration (defaults; overridden by GlobalVars / setup dialog)
@@ -3753,8 +3753,8 @@ function lc.add_layer_controls(layout, grid)
                 opts.text = def.scope == 0 and "X ALL" or "X"
                 opts.text_size = def.scope == 0 and 14 or 24
             elseif def.kind == "tap" or def.kind == "resync" then
-                -- Next to BPM, in the strip left of it.
-                opts.x, opts.width = span(def.kind == "tap" and 0 or 3, def.kind == "tap" and 2 or 5)
+                -- Strip left of BPM: RESYNC on the left, TAP right next to BPM.
+                opts.x, opts.width = span(def.kind == "tap" and 3 or 0, def.kind == "tap" and 5 or 2)
                 opts.y = lc.scene_row_y(layer_count)
                 opts.height = CELL_HEIGHT
                 opts.text = def.kind == "tap" and "TAP" or "RESYNC"
