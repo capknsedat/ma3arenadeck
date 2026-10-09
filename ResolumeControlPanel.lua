@@ -29,7 +29,7 @@ local signalTable = select(3, ...)
 local myHandle = select(4, ...)
 
 -- Bump when changing runtime behavior so System Monitor proves the reload.
-local PLUGIN_VERSION = "1.2.8-test5"
+local PLUGIN_VERSION = "1.2.8-test6"
 
 ------------------------------------------------------------------------
 -- Configuration (defaults; overridden by GlobalVars / setup dialog)
@@ -3345,6 +3345,8 @@ end
 function lc.run_extra_action(action)
     if action == "tap" or action == "resync" then
         local ok, err = lc.press_tempo(action == "tap" and "tempo_tap" or "resync")
+        -- Show the tapped tempo on the BPM button right away.
+        lc.bpm_read_at = 0
         return true, ok, err, action:upper()
     end
     local kind, n = action:match("^(%a+),(%d+)$")
@@ -3432,21 +3434,56 @@ function lc.read_speed_bpm(n)
 end
 
 --- Resolume's tempo right now: the tempo parameter alone (tiny answer,
---- id stored at SYNC), else the value from the last SYNC.
-function lc.fetch_resolume_bpm()
+--- id stored at SYNC). live_only = no fallback to the last SYNC value.
+function lc.fetch_resolume_bpm(live_only, timeout_sec)
     local id = cfg_get("TempoId", "")
     if id ~= "" then
         local raw = http_get(
             string.format("http://%s:%d/api/v1/parameter/by-id/%s", RESOLUME_HOST, RESOLUME_PORT, tostring(id)),
             "application/json",
-            1
+            timeout_sec or 1
         )
         local bpm = raw and tonumber(tostring(raw):match('"value"%s*:%s*(%-?[%d%.]+)'))
         if bpm and bpm > 0 then
             return bpm
         end
     end
+    if live_only then
+        return nil
+    end
     return tonumber(cfg_get("BpmValue", ""))
+end
+
+-- How often POLL reads Resolume's BPM for the BPM button (TAP, changes
+-- made in Resolume). After a failed read it waits BPM_READ_RETRY_SEC.
+lc.BPM_READ_SEC = 1.0
+lc.BPM_READ_RETRY_SEC = 5.0
+
+--- Poll loop: show Resolume's current BPM on the BPM button.
+function lc.bpm_display_tick()
+    if Time() < (lc.bpm_read_at or 0) then
+        return
+    end
+    local bpm = lc.fetch_resolume_bpm(true, 0.5)
+    if bpm == nil then
+        lc.bpm_read_at = Time() + lc.BPM_READ_RETRY_SEC
+        return
+    end
+    lc.bpm_read_at = Time() + lc.BPM_READ_SEC
+    local shown = tonumber(cfg_get("BpmValue", ""))
+    if shown == nil or math.abs(shown - bpm) >= 0.05 then
+        cfg_set("BpmValue", string.format("%.2f", bpm))
+        -- Changed in Resolume (TAP, Resolume's own controls): a linked
+        -- speed master follows, so the link never pulls the tempo back.
+        local n = lc.get_bpm_master()
+        if n > 0 and lc.last_bpm_sent and math.abs(bpm - lc.last_bpm_sent) >= 0.1 then
+            local got = lc.set_speed_bpm(n, bpm)
+            if got then
+                lc.last_bpm_sent = got
+            end
+        end
+        lc.update_bpm_display()
+    end
 end
 
 --- Move MA3 speed master n to `bpm`. Starts from the documented fader
@@ -4442,6 +4479,7 @@ local function run_monitor_loop()
         -- Layout taps queue fires here (SetVar) so Plugin/Cleanup never runs.
         handle_pending_fire()
         pcall(lc.bpm_tick)
+        pcall(lc.bpm_display_tick)
 
         local ok, err, changed, stats = update_playing_highlights()
         local tick_s = Time() - tick_start
@@ -4516,6 +4554,7 @@ local function run_monitor_loop()
             if Time() - (lc.bpm_checked or 0) >= 0.25 then
                 lc.bpm_checked = Time()
                 pcall(lc.bpm_tick)
+                pcall(lc.bpm_display_tick)
             end
             local remaining = until_t - Time()
             if remaining <= 0 then
