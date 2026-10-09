@@ -29,7 +29,7 @@ local signalTable = select(3, ...)
 local myHandle = select(4, ...)
 
 -- Bump when changing runtime behavior so System Monitor proves the reload.
-local PLUGIN_VERSION = "1.2.8-test4"
+local PLUGIN_VERSION = "1.2.8-test5"
 
 ------------------------------------------------------------------------
 -- Configuration (defaults; overridden by GlobalVars / setup dialog)
@@ -841,6 +841,10 @@ local function collect_clips(composition)
             type(composition.tempocontroller) == "table" and composition.tempocontroller.tempo or nil,
             nil
         )),
+        tempo_id = type(composition.tempocontroller) == "table"
+            and type(composition.tempocontroller.tempo) == "table"
+            and composition.tempocontroller.tempo.id
+            or nil,
     }
 end
 
@@ -3427,6 +3431,71 @@ function lc.read_speed_bpm(n)
     return bpm
 end
 
+--- Resolume's tempo right now: the tempo parameter alone (tiny answer,
+--- id stored at SYNC), else the value from the last SYNC.
+function lc.fetch_resolume_bpm()
+    local id = cfg_get("TempoId", "")
+    if id ~= "" then
+        local raw = http_get(
+            string.format("http://%s:%d/api/v1/parameter/by-id/%s", RESOLUME_HOST, RESOLUME_PORT, tostring(id)),
+            "application/json",
+            1
+        )
+        local bpm = raw and tonumber(tostring(raw):match('"value"%s*:%s*(%-?[%d%.]+)'))
+        if bpm and bpm > 0 then
+            return bpm
+        end
+    end
+    return tonumber(cfg_get("BpmValue", ""))
+end
+
+--- Move MA3 speed master n to `bpm`. Starts from the documented fader
+--- curve (50% = 60, 100% = 225, times 2^SpeedScale), then corrects a few
+--- times against the BPM the master shows. Returns the BPM it ends on.
+function lc.set_speed_bpm(n, bpm)
+    local pool = lc.speed_masters()
+    local master = pool and pool[n]
+    if master == nil then
+        return nil
+    end
+    local exponent = math.log(60 / 225) / math.log(50 / 100)
+    local scale = 0
+    pcall(function()
+        scale = tonumber(master.SpeedScale or master.speedscale) or 0
+    end)
+    local function set(pct)
+        pct = math.max(0, math.min(100, pct))
+        local ok = pcall(function()
+            master:SetFader({ value = pct })
+        end)
+        if not ok then
+            pcall(function()
+                Cmd(string.format("%s At %.3f", ToAddr(master), pct))
+            end)
+        end
+        pcall(function()
+            coroutine.yield(0.05)
+        end)
+        return pct
+    end
+    local pct = set(100 * (bpm / (225 * 2 ^ scale)) ^ (1 / exponent))
+    local got = lc.read_speed_bpm(n)
+    for _ = 1, 5 do
+        if got == nil or got <= 0 or math.abs(got - bpm) < 0.1 then
+            break
+        end
+        pct = set(pct * (bpm / got) ^ (1 / exponent))
+        got = lc.read_speed_bpm(n)
+    end
+    Printf(
+        "ResolumeControlPanel: speed master %d set to Resolume BPM %.1f (shows %s)",
+        n,
+        bpm,
+        got and string.format("%.1f", got) or "?"
+    )
+    return got
+end
+
 function lc.bpm_label()
     local bpm = tonumber(cfg_get("BpmValue", ""))
     local text = bpm and string.format("BPM %d", math.floor(bpm + 0.5)) or "BPM"
@@ -3511,6 +3580,18 @@ function lc.choose_bpm_master(display_handle)
     end
     cfg_set("BpmSpeed", tostring(math.floor(chosen)))
     lc.last_bpm_sent = nil
+    if chosen > 0 then
+        -- Start the speed master at Resolume's current BPM, so linking
+        -- never makes Resolume's tempo jump.
+        local bpm = lc.fetch_resolume_bpm()
+        if bpm then
+            local got = lc.set_speed_bpm(math.floor(chosen), bpm)
+            if got then
+                lc.last_bpm_sent = got
+                cfg_set("BpmValue", string.format("%.2f", bpm))
+            end
+        end
+    end
     Printf("ResolumeControlPanel: BPM follows %s", chosen > 0 and ("speed master " .. chosen) or "nothing")
     lc.update_bpm_display()
 end
@@ -3563,6 +3644,9 @@ function lc.add_layer_controls(layout, grid)
     lc.set_level(0, "master", grid.master or 1)
     if grid.tempo then
         cfg_set("BpmValue", string.format("%.2f", grid.tempo))
+    end
+    if grid.tempo_id then
+        cfg_set("TempoId", tostring(grid.tempo_id))
     end
     for _, layer in ipairs(grid.layers or {}) do
         lc.set_level(layer.index, "master", layer.master or 1)
@@ -4724,7 +4808,7 @@ function lc.delete_global_vars()
         "MacroStart", "OnlyWithThumbnail", "FetchThumbnails", "HighlightPreviewing",
         "PollInterval", "Monitor", "MonitorOwner", "Trigger", "Fire", "Action", "Bypassed",
         "BpmSpeed", "BpmValue", "FaderX", "FaderY",
-        "ColCur", "DeckCur", "ColCount", "SpeedMax", "BoRestore", "F_blackout_0",
+        "ColCur", "DeckCur", "TempoId", "ColCount", "SpeedMax", "BoRestore", "F_blackout_0",
         "Lvl_0_speed", "Lvl_0_xfade",
     }
     for n = 1, 200 do
