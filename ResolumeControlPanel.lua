@@ -29,7 +29,7 @@ local signalTable = select(3, ...)
 local myHandle = select(4, ...)
 
 -- Bump when changing runtime behavior so System Monitor proves the reload.
-local PLUGIN_VERSION = "1.2.8-test2"
+local PLUGIN_VERSION = "1.2.8-test3"
 
 ------------------------------------------------------------------------
 -- Configuration (defaults; overridden by GlobalVars / setup dialog)
@@ -2143,7 +2143,7 @@ function lc.ensure_layer_control_macros(grid)
     if lc.macro_by_name == nil then
         lc.scan_macro_slots()
     end
-    for _, old in ipairs({ "Res_Crossfader", "Res_ColPrev", "Res_ColNext" }) do
+    for _, old in ipairs({ "Res_Crossfader" }) do
         local idx = lc.macro_by_name[old]
         local obj = idx and DataPool().Macros[idx]
         if pool_object_valid(obj) and object_name(obj) == old then
@@ -2178,6 +2178,8 @@ function lc.ensure_layer_control_macros(grid)
     act(0, "resync", "resync", "Res_Resync")
     act(0, "blackout", "blackout", "Res_Blackout")
     fader(0, "speed", "Res_Speed")
+    act(0, "colprev", "colprev", "Res_ColPrev")
+    act(0, "colnext", "colnext", "Res_ColNext")
     for c = 1, grid.max_column or 0 do
         act(c, "col", "col," .. c, "Res_Col" .. c)
     end
@@ -2329,9 +2331,14 @@ local function clear_layout_elements(layout)
     end
 end
 
---- COMPOSITION / REC row: above the top layer and the column headers.
+--- COMPOSITION row: right above the top layer, on the column-header row.
 function lc.comp_row_y(layer_count)
-    return ORIGIN_Y + (layer_count or 0) * (CELL_HEIGHT + CELL_GAP_Y) + BUTTON_HEIGHT + CELL_GAP_Y
+    return ORIGIN_Y + (layer_count or 0) * (CELL_HEIGHT + CELL_GAP_Y)
+end
+
+--- REC / PLAY row (with BPM, TAP, RESYNC on its left): above that.
+function lc.scene_row_y(layer_count)
+    return lc.comp_row_y(layer_count) + BUTTON_HEIGHT + CELL_GAP_Y
 end
 
 local function cell_pos(column_index, layer_index, _layer_count)
@@ -3058,7 +3065,7 @@ local function add_control_buttons(layout, layer_count)
 
     -- Scene recorder row at the top, right of the COMPOSITION label (same
     -- row, starting over the first clip column): REC 1, PLAY 1, REC 2, ...
-    local scene_y = lc.comp_row_y(layer_count)
+    local scene_y = lc.scene_row_y(layer_count)
     local scene_x = ORIGIN_X + LABEL_WIDTH
     for n = 1, lc.SCENE_COUNT do
         for _, def in ipairs({
@@ -3244,9 +3251,9 @@ function lc.extra_label(kind, scope)
     elseif kind == "resync" then
         return "RESYNC"
     elseif kind == "colprev" then
-        return "\226\151\128"
+        return "PREV COL"
     elseif kind == "colnext" then
-        return "\226\150\182"
+        return "NEXT COL"
     elseif kind == "col" then
         return tostring(cfg_get("ColName_" .. scope, "Column " .. scope))
     elseif kind == "deck" then
@@ -3677,7 +3684,8 @@ function lc.add_layer_controls(layout, grid)
         if def.macro_index then
             local opts = {
                 y = row_y(def.scope),
-                height = CELL_HEIGHT,
+                -- Composition controls share the slimmer column-header row.
+                height = def.scope == 0 and BUTTON_HEIGHT or CELL_HEIGHT,
                 text_size = 16,
                 border = 4,
                 note = lc.level_note(def.scope, def.kind, 0),
@@ -3687,7 +3695,8 @@ function lc.add_layer_controls(layout, grid)
                 -- with the same size as that label.
                 local cx = label_pos(1, layer_count)
                 opts.x = cx
-                opts.y = row_y(0) + CELL_HEIGHT + CELL_GAP_Y
+                opts.y = lc.scene_row_y(layer_count)
+                opts.height = CELL_HEIGHT
                 opts.width = LABEL_WIDTH - CELL_GAP_X
                 opts.text = lc.bpm_label()
                 opts.text_size = 14
@@ -3700,11 +3709,13 @@ function lc.add_layer_controls(layout, grid)
             elseif def.kind == "tap" or def.kind == "resync" then
                 -- Next to BPM, in the strip left of it.
                 opts.x, opts.width = span(def.kind == "tap" and 0 or 3, def.kind == "tap" and 2 or 5)
-                opts.y = row_y(0) + CELL_HEIGHT + CELL_GAP_Y
+                opts.y = lc.scene_row_y(layer_count)
+                opts.height = CELL_HEIGHT
                 opts.text = def.kind == "tap" and "TAP" or "RESYNC"
             elseif def.kind == "speed" or def.kind == "xfade" then
                 opts.x, opts.width = span(def.kind == "speed" and 0 or 3, def.kind == "speed" and 2 or 5)
-                opts.y = row_y(0) + 2 * (CELL_HEIGHT + CELL_GAP_Y)
+                opts.y = lc.scene_row_y(layer_count) + CELL_HEIGHT + CELL_GAP_Y
+                opts.height = CELL_HEIGHT
                 opts.text = lc.fader_label(0, def.kind, lc.get_level(0, def.kind))
             elseif def.kind == "col" then
                 -- Column header over each clip column, like Resolume:
@@ -3713,7 +3724,7 @@ function lc.add_layer_controls(layout, grid)
                 opts.x = cx
                 opts.width = CELL_WIDTH
                 opts.height = BUTTON_HEIGHT
-                opts.y = ORIGIN_Y + layer_count * (CELL_HEIGHT + CELL_GAP_Y)
+                opts.y = lc.comp_row_y(layer_count)
                 opts.text = lc.extra_label(def.kind, def.scope)
                 opts.text_size = 14
             elseif def.kind == "colprev" or def.kind == "colnext" then
@@ -3723,7 +3734,7 @@ function lc.add_layer_controls(layout, grid)
                 opts.width = BUTTON_WIDTH
                 opts.height = BUTTON_HEIGHT
                 opts.text = lc.extra_label(def.kind, 0)
-                opts.text_size = 24
+                opts.text_size = 16
             elseif def.kind == "deck" then
                 opts.x = ORIGIN_X + (def.scope - 1) * (BUTTON_WIDTH + BUTTON_GAP)
                 opts.y = ctrl_y - (BUTTON_HEIGHT + BUTTON_GAP)
@@ -3776,7 +3787,7 @@ function lc.add_layer_controls(layout, grid)
         x = cx,
         y = row_y(0),
         width = LABEL_WIDTH - CELL_GAP_X,
-        height = CELL_HEIGHT,
+        height = BUTTON_HEIGHT,
         text = "COMPOSITION",
         text_size = 14,
         border = LAYER_BORDER_SIZE,
