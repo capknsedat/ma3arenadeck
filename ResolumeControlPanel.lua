@@ -15,7 +15,10 @@
 --   trigger L C  - fire Resolume clip at layer/column (from clip macros)
 --
 -- Layout buttons (macros) under the clip grid:
---   SYNC | POLL ON | POLL OFF | POLL xs | TRIG ON/OFF
+--   SYNC | POLL ON | POLL OFF | POLL xs | TRIG ON/OFF | prev / next column
+--   one button per Resolume deck below that
+-- Column headers over the grid, TAP / RESYNC / SPEED / crossfader and
+-- layer B / S / composition BO in the strip left of the layer labels.
 --
 -- API: GET http://<host>:<port>/api/v1/composition
 --      POST .../layers/{L}/clips/{C}/connect  (when trigger mode is on)
@@ -26,7 +29,7 @@ local signalTable = select(3, ...)
 local myHandle = select(4, ...)
 
 -- Bump when changing runtime behavior so System Monitor proves the reload.
-local PLUGIN_VERSION = "1.2.7-test3"
+local PLUGIN_VERSION = "1.2.8-test"
 
 ------------------------------------------------------------------------
 -- Configuration (defaults; overridden by GlobalVars / setup dialog)
@@ -151,7 +154,23 @@ lc.LEVEL_COLOR = {
     bypass_off = { r = 70, g = 70, b = 75 },
     bpm_linked = { r = 255, g = 170, b = 0 },
     bpm_free = { r = 70, g = 70, b = 75 },
+    speed = { r = 80, g = 160, b = 255 },
+    xfade = { r = 200, g = 200, b = 200 },
+    lbyp_on = { r = 255, g = 0, b = 0 },
+    lbyp_off = { r = 70, g = 70, b = 75 },
+    solo_on = { r = 255, g = 200, b = 0 },
+    solo_off = { r = 70, g = 70, b = 75 },
+    blackout_on = { r = 255, g = 0, b = 0 },
+    blackout_off = { r = 110, g = 30, b = 30 },
+    col_on = { r = 255, g = 0, b = 0 },
+    col_off = { r = 70, g = 70, b = 75 },
+    deck_on = { r = 0, g = 220, b = 255 },
+    deck_off = { r = 70, g = 70, b = 75 },
+    tempo = { r = 255, g = 170, b = 0 },
+    nav = { r = 40, g = 130, b = 200 },
 }
+-- Layer B (bypass) / S (solo) buttons between X and M.
+lc.TOGGLE_BTN_WIDTH = 54
 
 -- Control button colors (active = currently selected mode)
 local CTRL_COLOR = {
@@ -663,6 +682,18 @@ function lc.disconnect_all_url()
     )
 end
 
+--- Column launch (all layers) and deck switch: kind "columns" / "decks".
+function lc.index_action_url(kind, n, verb)
+    return string.format(
+        "http://%s:%d/api/v1/composition/%s/%d/%s",
+        RESOLUME_HOST,
+        RESOLUME_PORT,
+        kind,
+        tonumber(n) or 1,
+        verb
+    )
+end
+
 local function thumbnail_url(clip)
     if type(clip.thumbnail_path) == "string" and clip.thumbnail_path ~= "" then
         if clip.thumbnail_path:sub(1, 1) == "/" then
@@ -770,6 +801,8 @@ local function collect_clips(composition)
             master = tonumber(param_value(layer.master, 1)) or 1,
             opacity = tonumber(param_value(video.opacity, 1)) or 1,
             volume = type(audio.volume) == "table" and audio.volume or nil,
+            bypassed = param_value(layer.bypassed, false) == true,
+            solo = param_value(layer.solo, false) == true,
         }
     end
 
@@ -783,7 +816,33 @@ local function collect_clips(composition)
         max_column = used_max
     end
 
+    local function numbered(list, fallback)
+        local out = {}
+        for i, item in ipairs(type(list) == "table" and list or {}) do
+            local name = tostring(param_value(type(item) == "table" and item.name or nil, ""))
+            name = name:gsub("#", tostring(i))
+            if name == "" then
+                name = string.format("%s %d", fallback, i)
+            end
+            out[i] = {
+                index = i,
+                name = name,
+                connected = type(item) == "table" and param_value(item.connected, nil) or nil,
+                selected = type(item) == "table" and param_value(item.selected, false) == true,
+            }
+        end
+        return out
+    end
+    local comp_video = type(composition.video) == "table" and composition.video or {}
+    local xfader = type(composition.crossfader) == "table" and composition.crossfader or {}
+
     return clips, {
+        columns = numbered(composition.columns, "Column"),
+        decks = numbered(composition.decks, "Deck"),
+        speed = tonumber(param_value(composition.speed, nil)),
+        speed_max = type(composition.speed) == "table" and tonumber(composition.speed.max) or nil,
+        xfade = tonumber(param_value(xfader.phase, nil)),
+        comp_opacity = tonumber(param_value(comp_video.opacity, nil)),
         layers = layers_meta,
         layer_count = #layers_meta,
         max_column = max_column,
@@ -2098,6 +2157,22 @@ function lc.ensure_layer_control_macros(grid)
     add({ scope = 0, kind = "bypass", line = lc.action_macro_line("bypass"), name = "Res_Bypass" })
     fader(0, "master", "Res_GrandMaster")
     add({ scope = 0, kind = "bpm", line = plugin_command("bpm"), name = "Res_BPM" })
+    local function act(scope, kind, action, name)
+        add({ scope = scope, kind = kind, line = lc.action_macro_line(action), name = name })
+    end
+    act(0, "tap", "tap", "Res_Tap")
+    act(0, "resync", "resync", "Res_Resync")
+    act(0, "blackout", "blackout", "Res_Blackout")
+    fader(0, "speed", "Res_Speed")
+    fader(0, "xfade", "Res_Crossfader")
+    act(0, "colprev", "colprev", "Res_ColPrev")
+    act(0, "colnext", "colnext", "Res_ColNext")
+    for c = 1, grid.max_column or 0 do
+        act(c, "col", "col," .. c, "Res_Col" .. c)
+    end
+    for _, deck in ipairs(grid.decks or {}) do
+        act(deck.index, "deck", "deck," .. deck.index, "Res_Deck" .. deck.index)
+    end
 
     for _, layer in ipairs(grid.layers or {}) do
         local L = layer.index
@@ -2107,6 +2182,8 @@ function lc.ensure_layer_control_macros(grid)
             line = lc.action_macro_line(string.format("clear,%d", L)),
             name = string.format("Res_L%d_Clear", L),
         })
+        act(L, "lbyp", "lbyp," .. L, string.format("Res_L%d_B", L))
+        act(L, "solo", "solo," .. L, string.format("Res_L%d_S", L))
         for _, kind in ipairs({ "master", "audio", "video" }) do
             fader(L, kind, string.format("Res_L%d_%s", L, kind:sub(1, 1):upper()))
         end
@@ -3033,12 +3110,17 @@ function lc.parse_level_note(note)
 end
 
 function lc.fader_label(scope, kind, value)
+    if kind == "speed" then
+        return string.format("SPEED %d%%", math.floor((value or 0) * 200 + 0.5))
+    elseif kind == "xfade" then
+        return string.format("A \226\151\128\226\150\182 B  %d%%", math.floor((value or 0) * 100 + 0.5))
+    end
     local name = scope == 0 and "GM" or (kind == "master" and "M" or kind:sub(1, 1):upper())
     return string.format("%s %d%%", name, math.floor((value or 0) * 100 + 0.5))
 end
 
 function lc.style_fader_button(element, scope, kind, value)
-    local lit = (value or 0) > 0.001
+    local lit = (value or 0) > 0.001 or kind == "xfade"
     lc.clear_appearance(element)
     local c = lit and (lc.LEVEL_COLOR[kind] or lc.LEVEL_COLOR.master) or lc.LEVEL_COLOR.off
     set_element_border_color(element, c.r, c.g, c.b)
@@ -3107,11 +3189,258 @@ function lc.update_level_display(scope, kind, value)
         if s_scope == scope and s_kind == kind then
             if kind == "bypass" then
                 lc.style_bypass_button(element, value and true or false)
+            elseif lc.EXTRA_KINDS[kind] then
+                lc.style_extra(element, kind, scope)
             else
                 lc.style_fader_button(element, scope, kind, value)
             end
         end
     end
+end
+
+------------------------------------------------------------------------
+-- Column / deck / tempo / layer B+S / blackout buttons. Their state lives
+-- in GlobalVars (ResArena_F_<kind>_<n>, ColCur, DeckCur, ColName_<n> ...).
+------------------------------------------------------------------------
+
+lc.EXTRA_KINDS = {
+    lbyp = true, solo = true, blackout = true, tap = true, resync = true,
+    col = true, colprev = true, colnext = true, deck = true,
+}
+
+function lc.get_flag(kind, scope)
+    return cfg_get_bool(string.format("F_%s_%d", kind, scope or 0), false)
+end
+
+function lc.set_flag(kind, scope, on)
+    cfg_set(string.format("F_%s_%d", kind, scope or 0), on and "1" or "0")
+end
+
+function lc.extra_label(kind, scope)
+    if kind == "lbyp" then
+        return "B"
+    elseif kind == "solo" then
+        return "S"
+    elseif kind == "blackout" then
+        return "BO"
+    elseif kind == "tap" then
+        return "TAP"
+    elseif kind == "resync" then
+        return "RESYNC"
+    elseif kind == "colprev" then
+        return "\226\151\128"
+    elseif kind == "colnext" then
+        return "\226\150\182"
+    elseif kind == "col" then
+        return tostring(cfg_get("ColName_" .. scope, "Column " .. scope))
+    elseif kind == "deck" then
+        return tostring(cfg_get("DeckName_" .. scope, "Deck " .. scope))
+    end
+    return kind
+end
+
+function lc.extra_active(kind, scope)
+    if kind == "col" then
+        return tonumber(cfg_get("ColCur", 0)) == scope
+    elseif kind == "deck" then
+        return tonumber(cfg_get("DeckCur", 0)) == scope
+    elseif kind == "lbyp" or kind == "solo" or kind == "blackout" then
+        return lc.get_flag(kind, scope)
+    end
+    return nil
+end
+
+function lc.style_extra(element, kind, scope)
+    local active = lc.extra_active(kind, scope)
+    local c
+    if active == nil then
+        c = (kind == "tap" or kind == "resync") and lc.LEVEL_COLOR.tempo or lc.LEVEL_COLOR.nav
+    else
+        c = lc.LEVEL_COLOR[kind .. (active and "_on" or "_off")] or lc.LEVEL_COLOR.master
+    end
+    lc.clear_appearance(element)
+    pcall(function()
+        element:Set("bordersize", active and "10" or "4")
+    end)
+    set_element_border_color(element, c.r, c.g, c.b)
+    pcall(function()
+        element:Set("customtexttext", lc.extra_label(kind, scope))
+    end)
+end
+
+--- Restyle every button of one kind (e.g. all column headers).
+function lc.refresh_extra(kind)
+    local layout = DataPool().Layouts[LAYOUT_INDEX]
+    if layout == nil then
+        return
+    end
+    for _, element in ipairs(layout:Children()) do
+        local note = nil
+        pcall(function()
+            note = element.Note or element.note
+        end)
+        local s_scope, s_kind = lc.parse_level_note(note)
+        if s_kind == kind then
+            lc.style_extra(element, kind, s_scope)
+        end
+    end
+end
+
+--- At SYNC: remember what Resolume shows now.
+function lc.store_extra_state(grid)
+    local cur_col = 0
+    for _, col in ipairs(grid.columns or {}) do
+        cfg_set("ColName_" .. col.index, col.name)
+        if is_playing_state(col.connected) then
+            cur_col = col.index
+        end
+    end
+    if cur_col == 0 then
+        cur_col = math.min(tonumber(cfg_get("ColCur", 0)) or 0, grid.max_column or 0)
+    end
+    cfg_set("ColCur", tostring(cur_col))
+    local cur_deck = 0
+    for _, deck in ipairs(grid.decks or {}) do
+        cfg_set("DeckName_" .. deck.index, deck.name)
+        if deck.selected then
+            cur_deck = deck.index
+        end
+    end
+    cfg_set("DeckCur", tostring(cur_deck))
+    for _, layer in ipairs(grid.layers or {}) do
+        lc.set_flag("lbyp", layer.index, layer.bypassed)
+        lc.set_flag("solo", layer.index, layer.solo)
+    end
+    if grid.speed then
+        lc.set_level(0, "speed", math.max(0, math.min(1, grid.speed / 2)))
+    end
+    if grid.speed_max then
+        cfg_set("SpeedMax", string.format("%.4f", grid.speed_max))
+    end
+    if grid.xfade then
+        lc.set_level(0, "xfade", math.max(0, math.min(1, (grid.xfade + 1) / 2)))
+    end
+    local opacity = grid.comp_opacity
+    if opacity then
+        local dark = opacity <= 0.001
+        -- Keep BO on when Resolume is still dark from our own blackout.
+        lc.set_flag("blackout", 0, dark and lc.get_flag("blackout", 0))
+        if not dark then
+            cfg_set("BoRestore", string.format("%.4f", opacity))
+        end
+    end
+    cfg_set("ColCount", tostring(grid.max_column or 0))
+end
+
+--- Event parameters (tap, resync) are pressed and released like a button.
+function lc.press_tempo(param)
+    local ok, err = lc.http_put(
+        composition_url(),
+        string.format('{"tempocontroller":{"%s":{"value":true}}}', param),
+        2
+    )
+    if ok then
+        lc.http_put(
+            composition_url(),
+            string.format('{"tempocontroller":{"%s":{"value":false}}}', param),
+            2
+        )
+    end
+    return ok, err
+end
+
+--- Launch column n on every layer and mark it as the current column.
+function lc.launch_column(n)
+    local ok, err = http_post(lc.index_action_url("columns", n, "connect"), "", 2)
+    if ok then
+        cfg_set("ColCur", tostring(n))
+        lc.apply_fired_highlight(nil, n)
+        lc.refresh_extra("col")
+    end
+    return ok, err
+end
+
+--- Extra button actions; returns handled, ok, err, what.
+function lc.run_extra_action(action)
+    if action == "tap" or action == "resync" then
+        local ok, err = lc.press_tempo(action == "tap" and "tempo_tap" or "resync")
+        return true, ok, err, action:upper()
+    end
+    if action == "blackout" then
+        local on = not lc.get_flag("blackout", 0)
+        local value = on and 0 or (tonumber(cfg_get("BoRestore", 1)) or 1)
+        local ok, err = lc.http_put(
+            composition_url(),
+            string.format('{"video":{"opacity":{"value":%.4f}}}', value),
+            2
+        )
+        if ok then
+            lc.set_flag("blackout", 0, on)
+            lc.refresh_extra("blackout")
+        end
+        return true, ok, err, on and "BLACKOUT ON" or "BLACKOUT OFF"
+    end
+    if action == "colprev" or action == "colnext" then
+        local count = tonumber(cfg_get("ColCount", 0)) or 0
+        if count < 1 then
+            return true, false, "no columns (SYNC first)", action
+        end
+        local cur = tonumber(cfg_get("ColCur", 0)) or 0
+        local n
+        if action == "colnext" then
+            n = cur >= count and count or cur + 1
+        else
+            n = cur <= 1 and 1 or cur - 1
+        end
+        local ok, err = lc.launch_column(n)
+        return true, ok, err, "column " .. n
+    end
+    local kind, n = action:match("^(%a+),(%d+)$")
+    n = tonumber(n)
+    if kind == "col" then
+        local ok, err = lc.launch_column(n)
+        return true, ok, err, "column " .. n
+    elseif kind == "lbyp" or kind == "solo" then
+        local on = not lc.get_flag(kind, n)
+        local field = kind == "lbyp" and "bypassed" or "solo"
+        local ok, err = lc.http_put(
+            layer_url(n),
+            string.format('{"%s":{"value":%s}}', field, on and "true" or "false"),
+            2
+        )
+        if ok then
+            lc.set_flag(kind, n, on)
+            -- Solo can switch other layers too: read every layer's B / S back.
+            local comp = fetch_composition(2)
+            if type(comp) == "table" then
+                for L, layer in ipairs(comp.layers or {}) do
+                    lc.set_flag("lbyp", L, param_value(layer.bypassed, false) == true)
+                    lc.set_flag("solo", L, param_value(layer.solo, false) == true)
+                end
+            end
+            lc.refresh_extra("lbyp")
+            lc.refresh_extra("solo")
+        end
+        return true, ok, err, string.format("L%d %s %s", n, kind == "lbyp" and "bypass" or "solo", on and "ON" or "OFF")
+    elseif kind == "deck" then
+        local ok, err = http_post(lc.index_action_url("decks", n, "select"), "", 2)
+        if ok then
+            cfg_set("DeckCur", tostring(n))
+            lc.refresh_extra("deck")
+            -- The new deck has other clips: rebuild the layout, keep POLL on.
+            pcall(function()
+                coroutine.yield(0.3)
+            end)
+            local sync_ok, sync_err = pcall(lc.run_full_sync)
+            if not sync_ok then
+                Printf("ResolumeControlPanel: deck SYNC failed (%s)", tostring(sync_err))
+            end
+            set_monitor_flag(true)
+            update_control_button_styles()
+        end
+        return true, ok, err, "deck " .. n
+    end
+    return false
 end
 
 ------------------------------------------------------------------------
@@ -3301,11 +3630,25 @@ function lc.add_layer_controls(layout, grid)
         lc.set_volume_param(layer.index, layer.volume)
     end
     lc.set_bypass_flag(grid.bypassed)
+    lc.store_extra_state(grid)
 
     local fw = lc.FADER_BTN_WIDTH
     local gap = lc.FADER_GAP
-    local strip_w = lc.CTRL_BTN_WIDTH + gap + 3 * (fw + gap)
+    local tw = lc.TOGGLE_BTN_WIDTH
+    -- Strip columns: 0 X | 1 B | 2 S | 3 M | 4 A | 5 V
+    local widths = { [0] = lc.CTRL_BTN_WIDTH, tw, tw, fw, fw, fw }
+    local strip_w = 5 * gap
+    for i = 0, 5 do
+        strip_w = strip_w + widths[i]
+    end
     local x0 = ORIGIN_X - strip_w
+    local col_x = { [0] = x0 }
+    for i = 1, 5 do
+        col_x[i] = col_x[i - 1] + widths[i - 1] + gap
+    end
+    local function span(a, b)
+        return col_x[a], col_x[b] + widths[b] - col_x[a]
+    end
 
     local function row_y(scope)
         if scope == 0 then
@@ -3316,7 +3659,10 @@ function lc.add_layer_controls(layout, grid)
         return y
     end
 
-    local slots = { bypass = 0, master = 0, audio = 1, video = 2 }
+    local slots = { bypass = 1, lbyp = 1, solo = 2, blackout = 2, master = 3, audio = 4, video = 5 }
+    -- Bottom control row (SYNC, POLL ...): the column arrows follow TRIG,
+    -- the deck buttons get their own row below it.
+    local ctrl_y = ORIGIN_Y - (BUTTON_HEIGHT + BUTTON_GAP + BUTTON_ROW_OFFSET)
 
     for _, def in ipairs(defs) do
         if def.macro_index then
@@ -3342,19 +3688,53 @@ function lc.add_layer_controls(layout, grid)
                 opts.width = lc.CTRL_BTN_WIDTH
                 opts.text = def.scope == 0 and "X ALL" or "X"
                 opts.text_size = def.scope == 0 and 14 or 24
+            elseif def.kind == "tap" or def.kind == "resync" then
+                -- Next to BPM, in the strip left of it.
+                opts.x, opts.width = span(def.kind == "tap" and 0 or 3, def.kind == "tap" and 2 or 5)
+                opts.y = row_y(0) + CELL_HEIGHT + CELL_GAP_Y
+                opts.text = def.kind == "tap" and "TAP" or "RESYNC"
+            elseif def.kind == "speed" or def.kind == "xfade" then
+                opts.x, opts.width = span(def.kind == "speed" and 0 or 3, def.kind == "speed" and 2 or 5)
+                opts.y = row_y(0) + 2 * (CELL_HEIGHT + CELL_GAP_Y)
+                opts.text = lc.fader_label(0, def.kind, lc.get_level(0, def.kind))
+            elseif def.kind == "col" then
+                -- Column header over each clip column, like Resolume.
+                local cx = cell_pos(def.scope, 1, layer_count)
+                opts.x = cx
+                opts.width = CELL_WIDTH
+                opts.height = BUTTON_HEIGHT
+                opts.y = row_y(0) + CELL_HEIGHT + CELL_GAP_Y
+                opts.text = lc.extra_label(def.kind, def.scope)
+                opts.text_size = 14
+            elseif def.kind == "colprev" or def.kind == "colnext" then
+                local slot = def.kind == "colprev" and 5 or 6
+                opts.x = ORIGIN_X + slot * (BUTTON_WIDTH + BUTTON_GAP)
+                opts.y = ctrl_y
+                opts.width = BUTTON_WIDTH
+                opts.height = BUTTON_HEIGHT
+                opts.text = lc.extra_label(def.kind, 0)
+                opts.text_size = 24
+            elseif def.kind == "deck" then
+                opts.x = ORIGIN_X + (def.scope - 1) * (BUTTON_WIDTH + BUTTON_GAP)
+                opts.y = ctrl_y - (BUTTON_HEIGHT + BUTTON_GAP)
+                opts.width = BUTTON_WIDTH
+                opts.height = BUTTON_HEIGHT
+                opts.text = lc.extra_label(def.kind, def.scope)
+                opts.text_size = 14
             else
-                local slot = slots[def.kind] or 0
+                local slot = slots[def.kind] or 3
+                opts.x = col_x[slot]
+                opts.width = widths[slot]
                 if def.scope == 0 and def.kind == "master" then
-                    slot = 1 -- GM next to B
+                    -- GM spans the M, A and V columns below it.
+                    opts.x, opts.width = span(3, 5)
                 end
-                opts.x = x0 + lc.CTRL_BTN_WIDTH + gap + slot * (fw + gap)
-                opts.width = fw
-                if def.scope == 0 and def.kind == "master" then
-                    -- GM spans the A and V columns below it.
-                    opts.width = 2 * fw + gap
+                if lc.EXTRA_KINDS[def.kind] then
+                    opts.text = lc.extra_label(def.kind, def.scope)
+                else
+                    opts.text = def.kind == "bypass" and "B"
+                        or lc.fader_label(def.scope, def.kind, lc.get_level(def.scope, def.kind))
                 end
-                opts.text = def.kind == "bypass" and "B"
-                    or lc.fader_label(def.scope, def.kind, lc.get_level(def.scope, def.kind))
             end
 
             local el = add_element(layout, opts)
@@ -3370,6 +3750,8 @@ function lc.add_layer_controls(layout, grid)
                     set_element_border_color(el, c.r, c.g, c.b)
                 elseif def.kind == "bypass" then
                     lc.style_bypass_button(el, grid.bypassed)
+                elseif lc.EXTRA_KINDS[def.kind] then
+                    lc.style_extra(el, def.kind, def.scope)
                 else
                     lc.style_fader_button(el, def.scope, def.kind, lc.get_level(def.scope, def.kind))
                 end
@@ -3547,8 +3929,14 @@ local function apply_fired_highlight(layer, column)
     end
 end
 
+lc.apply_fired_highlight = apply_fired_highlight
+
 function lc.layer_level_body(kind, value)
-    if kind == "video" then
+    if kind == "speed" then
+        return string.format('{"speed":{"value":%.4f}}', value)
+    elseif kind == "xfade" then
+        return string.format('{"crossfader":{"phase":{"value":%.4f}}}', value)
+    elseif kind == "video" then
         return string.format('{"video":{"opacity":{"value":%.4f}}}', value)
     elseif kind == "audio" then
         return string.format('{"audio":{"volume":{"value":%.4f}}}', value)
@@ -3747,8 +4135,12 @@ function lc.run_control_action(action)
 
     local t0 = Time()
     local ok, err, what
+    local handled
+    handled, ok, err, what = lc.run_extra_action(action)
 
-    if action == "clearall" then
+    if handled then
+        -- done above
+    elseif action == "clearall" then
         what = "clear all"
         ok, err = http_post(lc.disconnect_all_url(), "", 2)
         if ok then
@@ -3825,7 +4217,10 @@ function lc.process_pending_actions()
     for i, action in ipairs(actions) do
         local key = action:match("^(lvl,%d+,%a+),")
         if not key or last_for[key] == i then
-            if action == "clearall" or action == "bypass" or action:match("^clear,%d+$") then
+            if action == "clearall" or action == "bypass" or action:match("^clear,%d+$")
+                or action == "blackout" or action == "colprev" or action == "colnext"
+                or action:match("^col,%d+$") or action:match("^lbyp,%d+$") or action:match("^solo,%d+$")
+            then
                 lc.record_event("a", action)
             end
             if lc.run_control_action(action) then
@@ -4147,6 +4542,11 @@ function lc.queue_level(scope, kind, frac)
     local raw = frac
     if kind == "audio" then
         raw = lc.fraction_to_volume(lc.get_volume_param(scope), frac)
+    elseif kind == "speed" then
+        -- Fader middle = 100 %, top = 200 % (capped at Resolume's maximum).
+        raw = math.min(frac * 2, tonumber(cfg_get("SpeedMax", 2)) or 2)
+    elseif kind == "xfade" then
+        raw = frac * 2 - 1
     end
     local action = string.format("lvl,%d,%s,%.3f,%.4f", scope, kind, frac, raw)
     pcall(function()
@@ -4168,7 +4568,11 @@ function lc.parse_fader_value(v)
 end
 
 function lc.fader_title(scope, kind)
-    if scope == 0 then
+    if kind == "speed" then
+        return "Composition Speed"
+    elseif kind == "xfade" then
+        return "Crossfader A / B"
+    elseif scope == 0 then
         return "Composition Grand Master"
     end
     local names = { master = "Master", audio = "Audio", video = "Video" }
@@ -4317,8 +4721,10 @@ end
 lc.OWN_MACRO_PATTERNS = {
     "^Res_Sync$", "^Res_PollOn$", "^Res_PollOff$", "^Res_Interval$", "^Res_TrigToggle$",
     "^Res_Clip_L%d+C%d+$", "^Res_ClearAll$", "^Res_Bypass$", "^Res_GrandMaster$",
-    "^Res_L%d+_Clear$", "^Res_L%d+_[MAV]$",
+    "^Res_L%d+_Clear$", "^Res_L%d+_[MAVBS]$",
     "^Res_Rec%d+$", "^Res_Play%d+$", "^Res_Scene%d+$", "^Res_BPM$",
+    "^Res_Tap$", "^Res_Resync$", "^Res_Blackout$", "^Res_Speed$", "^Res_Crossfader$",
+    "^Res_ColPrev$", "^Res_ColNext$", "^Res_Col%d+$", "^Res_Deck%d+$",
 }
 lc.OWN_LAYOUT_NAMES = { "ResolumeControlPanel", "MA3ArenaDeck" }
 
@@ -4396,7 +4802,17 @@ function lc.delete_global_vars()
         "MacroStart", "OnlyWithThumbnail", "FetchThumbnails", "HighlightPreviewing",
         "PollInterval", "Monitor", "MonitorOwner", "Trigger", "Fire", "Action", "Bypassed",
         "BpmSpeed", "BpmValue", "FaderX", "FaderY",
+        "ColCur", "DeckCur", "ColCount", "SpeedMax", "BoRestore", "F_blackout_0",
+        "Lvl_0_speed", "Lvl_0_xfade",
     }
+    for n = 1, 200 do
+        keys[#keys + 1] = "ColName_" .. n
+        keys[#keys + 1] = "DeckName_" .. n
+    end
+    for n = 1, 64 do
+        keys[#keys + 1] = "F_lbyp_" .. n
+        keys[#keys + 1] = "F_solo_" .. n
+    end
     for n = 1, lc.SCENE_COUNT do
         keys[#keys + 1] = "Scene" .. n
     end
@@ -4583,6 +4999,8 @@ end
 ------------------------------------------------------------------------
 -- Entry point
 ------------------------------------------------------------------------
+
+lc.run_full_sync = run_full_sync
 
 function Main(display_handle, argument)
     load_config()
