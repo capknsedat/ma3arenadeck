@@ -124,11 +124,11 @@ Left of the layer labels, every layer row gets:
 | **A** | Layer audio volume |
 | **V** | Layer video opacity |
 
-Above the top layer, the **COMPOSITION** row has **X ALL** (disconnect all clips), **B** (composition bypass, toggles), **BO** (blackout: composition video opacity to 0 and back, macro `Res_Blackout`) and **GM** (grand master).
+Above the top layer, the **COMPOSITION** row has **X ALL** (disconnect all clips), **B** (composition bypass = blackout, toggles) and **GM** (grand master).
 
-Above that, next to **BPM**: **TAP** (tap tempo, `Res_Tap`) and **RESYNC** (restart the beat, `Res_Resync`). One row higher: **SPEED** (composition speed fader, middle = 100 %, top = 200 %, `Res_Speed`), which opens a fader popup like GM.
+Above that, next to **BPM**: **TAP** (tap tempo, `Res_Tap`) and **RESYNC** (restart the beat, `Res_Resync`).
 
-Right above the top layer, on the same row as COMPOSITION (X ALL, B, BO, GM), every column gets a header button with its Resolume name (`Res_Col<n>`): tapping it launches that whole column. The launched column has a red frame. **PREV COL / NEXT COL** after TRIG (`Res_ColPrev`, `Res_ColNext`) launch the previous / next column. The REC / PLAY row sits above, with BPM, TAP and RESYNC on its left. Below the control row, one button per Resolume deck (`Res_Deck<n>`, selected deck cyan) switches deck and runs SYNC by itself so the new deck's clips appear. Like the other controls these work while POLL ON runs.
+Right above the top layer, on the same row as COMPOSITION (X ALL, B, BO, GM), every column gets a header button with its Resolume name (`Res_Col<n>`): tapping it launches that whole column. The launched column has a red frame. The REC / PLAY row sits above, with BPM, TAP and RESYNC on its left. Below the control row, one button per Resolume deck (`Res_Deck<n>`, selected deck cyan) switches deck and runs SYNC by itself so the new deck's clips appear. Like the other controls these work while POLL ON runs.
 
 **M / A / V / GM** show the current level. Tapping one opens a fader popup; drag it and Resolume follows (the newest position is sent on each poll step). The popup takes over only once it reaches the current level (shown as `A 20% -> 50%` until then), so grabbing it never makes the sound or picture jump. Changes made directly in Resolume are not read back until the next **SYNC**.
 
