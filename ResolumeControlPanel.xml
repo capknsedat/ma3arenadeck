@@ -19,7 +19,7 @@
       That path has a size limit and ReloadAllPlugins will NOT pick up
       disk edits. Keep Installed=Yes / external file.
     -->
-    <UserPlugin Name="ResolumeControlPanel" Version="1.2.6.0" Author="Sedat Çapkın &amp; Simon Kotting" Path="ResolumeControlPanel">
+    <UserPlugin Name="ResolumeControlPanel" Version="1.2.8.0" Author="Sedat Çapkın &amp; Simon Kotting" Path="ResolumeControlPanel">
         <ComponentLua Name="ResolumeControlPanel" FileName="ResolumeControlPanel.lua"/>
     </UserPlugin>
 </GMA3>
