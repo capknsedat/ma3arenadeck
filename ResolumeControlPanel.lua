@@ -29,7 +29,7 @@ local signalTable = select(3, ...)
 local myHandle = select(4, ...)
 
 -- Bump when changing runtime behavior so System Monitor proves the reload.
-local PLUGIN_VERSION = "1.2.8-test6"
+local PLUGIN_VERSION = "1.2.8-test7"
 
 ------------------------------------------------------------------------
 -- Configuration (defaults; overridden by GlobalVars / setup dialog)
@@ -3454,9 +3454,10 @@ function lc.fetch_resolume_bpm(live_only, timeout_sec)
     return tonumber(cfg_get("BpmValue", ""))
 end
 
--- How often POLL reads Resolume's BPM for the BPM button (TAP, changes
--- made in Resolume). After a failed read it waits BPM_READ_RETRY_SEC.
-lc.BPM_READ_SEC = 1.0
+-- POLL reads Resolume's BPM for the BPM button once per poll interval
+-- (never more often than BPM_READ_MIN_SEC), and right after TAP / RESYNC.
+-- After a failed read it waits BPM_READ_RETRY_SEC.
+lc.BPM_READ_MIN_SEC = 1.0
 lc.BPM_READ_RETRY_SEC = 5.0
 
 --- Poll loop: show Resolume's current BPM on the BPM button.
@@ -3469,7 +3470,7 @@ function lc.bpm_display_tick()
         lc.bpm_read_at = Time() + lc.BPM_READ_RETRY_SEC
         return
     end
-    lc.bpm_read_at = Time() + lc.BPM_READ_SEC
+    lc.bpm_read_at = Time() + math.max(lc.BPM_READ_MIN_SEC, get_poll_interval())
     local shown = tonumber(cfg_get("BpmValue", ""))
     if shown == nil or math.abs(shown - bpm) >= 0.05 then
         cfg_set("BpmValue", string.format("%.2f", bpm))
